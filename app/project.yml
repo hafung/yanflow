@@ -1,0 +1,11 @@
+name: yanflow
+version: 0.1.0
+mode: bin
+output: ../build/artifacts/yanflow
+build-dir: ../build/typephp/yanflow
+optimize: 3
+no-progress: true
+
+sources:
+  - main.php
+  - cpp-src

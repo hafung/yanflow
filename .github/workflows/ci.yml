@@ -1,0 +1,85 @@
+name: Windows package
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  TYPEPHP_VERSION: v0.6.8
+  TYPEPHP_ARCHIVE: tpc_v0.6.8_windows_x64.zip
+  TYPEPHP_SHA256: c312d3c595c1ebca77d451da84cdbfc0ae606655f73a6ed31ec04fb779cc86ba
+
+jobs:
+  package:
+    runs-on: windows-2022
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore speech resources
+        uses: actions/cache@v4
+        with:
+          path: build/deps/yanflow
+          key: yanflow-speech-v1-${{ runner.os }}
+
+      - name: Install pinned TypePHP toolchain
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP $env:TYPEPHP_ARCHIVE
+          Invoke-WebRequest "https://github.com/swoole/typephp/releases/download/$env:TYPEPHP_VERSION/$env:TYPEPHP_ARCHIVE" -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actual -ne $env:TYPEPHP_SHA256) { throw "TypePHP checksum mismatch: $actual" }
+          $root = Join-Path $env:RUNNER_TEMP "typephp"
+          Expand-Archive -Force $archive $root
+          $home = (Get-ChildItem $root -Directory | Select-Object -First 1).FullName
+          "TYPEPHP_HOME=$home" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TYPEPHP_RUNTIME_DIR=$home" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PHP_HOME=$home" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PHPX_HOME=$home\phpx" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build and smoke-test portable package
+        shell: cmd
+        run: build\windows\build-yanflow.cmd
+
+      - name: Run speech pipeline regressions
+        shell: cmd
+        run: |
+          call build\windows\test-yanflow-worker.cmd
+          if errorlevel 1 exit /b %errorlevel%
+          call build\windows\test-yanflow-pipeline.cmd
+          if errorlevel 1 exit /b %errorlevel%
+          call build\windows\test-yanflow-fallback.cmd
+          if errorlevel 1 exit /b %errorlevel%
+
+      - name: Create release archive
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { $env:GITHUB_SHA.Substring(0, 8) }
+          $archive = "YanFlow-$version-windows-x64.zip"
+          Compress-Archive -Path "build\artifacts\yanflow-windows-x64\*" -DestinationPath $archive
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$hash  $archive" | Set-Content -Encoding ascii SHA256SUMS
+          "YANFLOW_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: YanFlow-windows-x64
+          path: |
+            YanFlow-*-windows-x64.zip
+            SHA256SUMS
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$env:GITHUB_REF_NAME" "$env:YANFLOW_ARCHIVE" SHA256SUMS --verify-tag --generate-notes --title "YanFlow $env:GITHUB_REF_NAME"

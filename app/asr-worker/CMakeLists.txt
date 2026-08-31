@@ -1,0 +1,26 @@
+cmake_minimum_required(VERSION 3.16)
+project(yanflow-asr-worker LANGUAGES C CXX)
+
+if(NOT DEFINED FUNASR_RUNTIME_DIR OR NOT EXISTS "${FUNASR_RUNTIME_DIR}/funasr-common/funasr_vad.h")
+    message(FATAL_ERROR "FUNASR_RUNTIME_DIR must point to SenseVoice/runtime/llama.cpp")
+endif()
+if(NOT DEFINED LLAMA_CPP_DIR OR NOT EXISTS "${LLAMA_CPP_DIR}/ggml/CMakeLists.txt")
+    message(FATAL_ERROR "LLAMA_CPP_DIR must point to the pinned llama.cpp checkout")
+endif()
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
+
+add_subdirectory("${LLAMA_CPP_DIR}/ggml" "${CMAKE_BINARY_DIR}/ggml" EXCLUDE_FROM_ALL)
+
+add_executable(yanflow-asr-worker yanflow-asr-worker.cpp)
+target_include_directories(yanflow-asr-worker PRIVATE "${FUNASR_RUNTIME_DIR}/funasr-common")
+target_link_libraries(yanflow-asr-worker PRIVATE ggml)
+if(MSVC)
+    target_compile_options(yanflow-asr-worker PRIVATE /O2 /utf-8 /EHsc)
+endif()
