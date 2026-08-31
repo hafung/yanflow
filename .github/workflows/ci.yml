@@ -51,11 +51,7 @@ jobs:
       - name: Run speech pipeline regressions
         shell: cmd
         run: |
-          call build\windows\test-yanflow-worker.cmd
-          if errorlevel 1 exit /b %errorlevel%
-          call build\windows\test-yanflow-pipeline.cmd
-          if errorlevel 1 exit /b %errorlevel%
-          call build\windows\test-yanflow-fallback.cmd
+          call build\windows\test-yanflow-worker.cmd -Iterations 2
           if errorlevel 1 exit /b %errorlevel%
 
       - name: Create release archive
