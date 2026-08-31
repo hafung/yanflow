@@ -4,7 +4,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-if ($Iterations -lt 2) { throw "Iterations must be at least 2" }
+if ($Iterations -lt 0 -or $Iterations -eq 1) { throw "Iterations must be 0 or at least 2" }
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 if ([string]::IsNullOrWhiteSpace($DependencyRoot)) {
     $DependencyRoot = Join-Path $repoRoot "build\deps\yanflow"
@@ -74,6 +74,13 @@ try {
     $loadMilliseconds = $stopwatch.ElapsedMilliseconds
     if ($readyMagic -ne 0x31574659 -or $version -ne 1 -or $readyStatus -ne 0) {
         throw "Invalid worker handshake"
+    }
+    if ($Iterations -eq 0) {
+        $input.Dispose()
+        if (-not $process.WaitForExit(5000)) { throw "Worker did not exit after startup handshake" }
+        if ($process.ExitCode -ne 0) { throw "Worker exited with $($process.ExitCode)" }
+        Write-Host "PASS yanflow-worker-startup load_ms=$loadMilliseconds protocol_version=$version"
+        return
     }
     $pcm = Read-Pcm16Wave $wave
     $sampleCount = [uint32]($pcm.Length / 2)

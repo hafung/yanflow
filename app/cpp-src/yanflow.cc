@@ -372,13 +372,13 @@ public:
     }
 
     bool transcribe(const std::wstring& root, const std::vector<int16_t>& samples, bool useVad,
-        std::wstring& text, std::wstring& error, DWORD responseTimeoutOverride = 0)
+        std::wstring& text, std::wstring& error)
     {
         for (int attempt = 0; attempt < 2; attempt++) {
             if (process_ == nullptr && !start(root, error)) {
                 return false;
             }
-            const ExchangeResult result = exchange(samples, useVad, text, responseTimeoutOverride);
+            const ExchangeResult result = exchange(samples, useVad, text);
             if (result == ExchangeResult::Success) {
                 return true;
             }
@@ -496,8 +496,7 @@ private:
         return true;
     }
 
-    ExchangeResult exchange(const std::vector<int16_t>& samples, bool useVad, std::wstring& text,
-        DWORD responseTimeoutOverride)
+    ExchangeResult exchange(const std::vector<int16_t>& samples, bool useVad, std::wstring& text)
     {
         if (samples.size() > static_cast<size_t>(kSampleRate * 60)) {
             return ExchangeResult::InferenceFailed;
@@ -513,9 +512,8 @@ private:
         uint32_t bytes = 0;
         uint64_t elapsedMicroseconds = 0;
         const uint64_t audioMilliseconds = samples.size() * 1000ull / kSampleRate;
-        const DWORD responseTimeout = responseTimeoutOverride > 0 ? responseTimeoutOverride :
-            static_cast<DWORD>(std::min<uint64_t>(180000,
-                std::max<uint64_t>(30000, 20000 + audioMilliseconds * 8)));
+        const DWORD responseTimeout = static_cast<DWORD>(std::min<uint64_t>(180000,
+            std::max<uint64_t>(30000, 20000 + audioMilliseconds * 8)));
         if (!readValue(magic, responseTimeout) || !readValue(status, 1000) ||
             !readValue(bytes, 1000) || !readValue(elapsedMicroseconds, 1000) ||
             magic != kResponseMagic || bytes > 1024 * 1024) {
@@ -1365,8 +1363,7 @@ private:
 
     bool transcribe(const std::vector<int16_t>& samples, bool useVad, std::wstring& text, std::wstring& error)
     {
-        const DWORD smokeTimeout = smokeMilliseconds_ < 0 ? 600000 : 0;
-        return asrWorker_.transcribe(executableDirectory(), samples, useVad, text, error, smokeTimeout);
+        return asrWorker_.transcribe(executableDirectory(), samples, useVad, text, error);
     }
 
     void acceptResult(std::wstring* result)
@@ -1711,6 +1708,6 @@ Int php_yanflow_asr_smoke()
     PersistentAsrWorker worker;
     std::wstring text;
     std::wstring error;
-    if (!worker.transcribe(root, samples, true, text, error, 600000)) return 24;
+    if (!worker.transcribe(root, samples, true, text, error)) return 24;
     return text.find(L"\u6ee8\u6d77\u65b0\u533a\u6709\u623f") == std::wstring::npos ? 25 : 0;
 }

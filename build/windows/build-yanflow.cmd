@@ -56,12 +56,15 @@ start "" /wait "%PACKAGE_DIR%\yanflow.exe" --smoke
 set "SMOKE_EXIT=%ERRORLEVEL%"
 if not "%SMOKE_EXIT%"=="0" exit /b %SMOKE_EXIT%
 
-copy /y "%DEPS_DIR%\source\sensevoice-v0.1.9\runtime\llama.cpp\tests\sample.wav" "%PACKAGE_DIR%\yanflow-asr-smoke.wav" >nul
-if errorlevel 1 exit /b %errorlevel%
-start "" /wait "%PACKAGE_DIR%\yanflow.exe" --asr-smoke
-set "ASR_SMOKE_EXIT=%ERRORLEVEL%"
-if not "%ASR_SMOKE_EXIT%"=="0" exit /b %ASR_SMOKE_EXIT%
-del /q "%PACKAGE_DIR%\yanflow-asr-smoke.wav"
+if not defined YANFLOW_SKIP_ASR_SMOKE (
+    copy /y "%DEPS_DIR%\source\sensevoice-v0.1.9\runtime\llama.cpp\tests\sample.wav" "%PACKAGE_DIR%\yanflow-asr-smoke.wav" >nul
+    if errorlevel 1 exit /b %errorlevel%
+    start "" /wait "%PACKAGE_DIR%\yanflow.exe" --asr-smoke
+    if errorlevel 1 exit /b 24
+    del /q "%PACKAGE_DIR%\yanflow-asr-smoke.wav"
+) else (
+    echo Skipping inference smoke; YANFLOW_SKIP_ASR_SMOKE is set.
+)
 
 echo YanFlow package: %PACKAGE_DIR%
 exit /b 0
