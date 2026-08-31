@@ -38,11 +38,11 @@ jobs:
           if ($actual -ne $env:TYPEPHP_SHA256) { throw "TypePHP checksum mismatch: $actual" }
           $root = Join-Path $env:RUNNER_TEMP "typephp"
           Expand-Archive -Force $archive $root
-          $home = (Get-ChildItem $root -Directory | Select-Object -First 1).FullName
-          "TYPEPHP_HOME=$home" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "TYPEPHP_RUNTIME_DIR=$home" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "PHP_HOME=$home" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "PHPX_HOME=$home\phpx" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $typephpDir = (Get-ChildItem $root -Directory | Select-Object -First 1).FullName
+          "TYPEPHP_HOME=$typephpDir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TYPEPHP_RUNTIME_DIR=$typephpDir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PHP_HOME=$typephpDir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PHPX_HOME=$typephpDir\phpx" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Build and smoke-test portable package
         shell: cmd
