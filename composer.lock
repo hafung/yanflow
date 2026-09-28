@@ -1,0 +1,73 @@
+{
+    "_readme": [
+        "This file locks the dependencies of your project to a known state",
+        "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
+        "This file is @generated automatically"
+    ],
+    "content-hash": "4c91ac2ecab9527f1ee570b224bf6c85",
+    "packages": [
+        {
+            "name": "typephp-org/native-core",
+            "version": "v0.1.0-alpha.2",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/typephp-org/native-core.git",
+                "reference": "f45898c591727962bfe1a0f2df72a1860ceb7f46"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/typephp-org/native-core/zipball/f45898c591727962bfe1a0f2df72a1860ceb7f46",
+                "reference": "f45898c591727962bfe1a0f2df72a1860ceb7f46",
+                "shasum": ""
+            },
+            "require": {
+                "php": ">=8.4"
+            },
+            "bin": [
+                "bin/native"
+            ],
+            "type": "library",
+            "autoload": {
+                "psr-4": {
+                    "TypePHP\\NativeCore\\": "src/",
+                    "TypePHP\\NativeCore\\Host\\Daemon\\": "hosts/daemon/",
+                    "TypePHP\\NativeCore\\Host\\Worker\\": "hosts/worker/",
+                    "TypePHP\\NativeCore\\Host\\Console\\": "hosts/console/",
+                    "TypePHP\\NativeCore\\Host\\Windows\\": "hosts/windows/"
+                }
+            },
+            "notification-url": "https://packagist.org/downloads/",
+            "license": [
+                "MIT"
+            ],
+            "description": "AOT-first, host-neutral native application core for TypePHP and Zend PHP",
+            "homepage": "https://github.com/typephp-org/native-core",
+            "keywords": [
+                "aot",
+                "application",
+                "daemon",
+                "desktop",
+                "native",
+                "typephp"
+            ],
+            "support": {
+                "issues": "https://github.com/typephp-org/native-core/issues",
+                "source": "https://github.com/typephp-org/native-core"
+            },
+            "time": "2026-09-28T02:25:45+00:00"
+        }
+    ],
+    "packages-dev": [],
+    "aliases": [],
+    "minimum-stability": "stable",
+    "stability-flags": {
+        "typephp-org/native-core": 15
+    },
+    "prefer-stable": false,
+    "prefer-lowest": false,
+    "platform": {
+        "php": ">=8.4"
+    },
+    "platform-dev": {},
+    "plugin-api-version": "2.9.0"
+}

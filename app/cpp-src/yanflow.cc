@@ -38,8 +38,8 @@ constexpr UINT kMessageResult = WM_APP + 1;
 constexpr UINT kMessageStatus = WM_APP + 2;
 constexpr UINT_PTR kTimerSmoke = 1;
 constexpr UINT_PTR kTimerPipelineStop = 2;
-constexpr UINT_PTR kTimerAnimation = 3;
 constexpr UINT_PTR kTimerCopyFeedback = 4;
+constexpr UINT_PTR kTimerIdle = 5;
 constexpr int kHotkeyStart = 1;
 constexpr int kHotkeyStop = 2;
 constexpr int kHotkeyVisibility = 3;
@@ -58,6 +58,7 @@ constexpr int kFramesPerBuffer = 320;
 constexpr int kAudioBuffers = 6;
 constexpr size_t kRingSamples = kSampleRate * 30;
 constexpr size_t kMaximumUtteranceSamples = kSampleRate * 8;
+constexpr uint64_t kIdleTimeoutMilliseconds = 30000;
 constexpr int kCollapsedSize = 72;
 constexpr int kBubbleWidth = 520;
 constexpr int kBubbleHeight = 136;
@@ -301,11 +302,6 @@ public:
         return dropped_.load(std::memory_order_acquire);
     }
 
-    uint32_t takeLevel()
-    {
-        return level_.exchange(0, std::memory_order_acq_rel);
-    }
-
     bool noInputDevice() const
     {
         return lastOpenResult_ == MMSYSERR_NODRIVER;
@@ -335,10 +331,7 @@ private:
     {
         uint64_t writeIndex = write_.load(std::memory_order_relaxed);
         const uint64_t readIndex = read_.load(std::memory_order_acquire);
-        uint32_t peak = 0;
         for (size_t index = 0; index < count; index++) {
-            const int32_t signedSample = samples[index];
-            peak = std::max(peak, static_cast<uint32_t>(std::abs(signedSample)));
             if (writeIndex - readIndex >= ring_.size()) {
                 dropped_.fetch_add(count - index, std::memory_order_relaxed);
                 break;
@@ -348,7 +341,6 @@ private:
         }
         write_.store(writeIndex, std::memory_order_release);
         captured_.fetch_add(count, std::memory_order_release);
-        level_.store(std::min<uint32_t>(1000, peak * 1000 / 32768), std::memory_order_release);
     }
 
     HWAVEIN handle_ = nullptr;
@@ -360,7 +352,6 @@ private:
     std::atomic<bool> running_ = false;
     std::atomic<uint64_t> captured_ = 0;
     std::atomic<uint64_t> dropped_ = 0;
-    std::atomic<uint32_t> level_ = 0;
     MMRESULT lastOpenResult_ = MMSYSERR_NOERROR;
 };
 
@@ -597,7 +588,8 @@ public:
             return 2;
         }
         if (smokeMilliseconds_ > 0 &&
-            (applicationIcon_ == nullptr || applicationSmallIcon_ == nullptr || floatingIcon_ == nullptr)) {
+            (applicationIcon_ == nullptr || applicationSmallIcon_ == nullptr ||
+             floatingIcon_ == nullptr || listeningIcon_ == nullptr)) {
             exitCode_ = 70;
         }
         workerRunning_.store(true, std::memory_order_release);
@@ -609,11 +601,16 @@ public:
         RegisterHotKey(window_, kHotkeyCopy, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'C');
         ShowWindow(window_, SW_SHOWNOACTIVATE);
         UpdateWindow(window_);
-        SetTimer(window_, kTimerAnimation, 60, nullptr);
+        SetTimer(window_, kTimerIdle, 1000, nullptr);
         if (smokeMilliseconds_ < 0) exitCode_ = 60;
         if (smokeMilliseconds_ == -3) {
             toggleListening();
             SetTimer(window_, kTimerSmoke, 1500, nullptr);
+        } else if (smokeMilliseconds_ == -6) {
+            lastSpeechTick_.store(GetTickCount64(), std::memory_order_release);
+            listening_.store(true, std::memory_order_release);
+            state_ = ListeningState::Listening;
+            SetTimer(window_, kTimerSmoke, 4500, nullptr);
         } else if (smokeMilliseconds_ == -4) {
             std::vector<int16_t> samples;
             if (readPcm16Wave(joinPath(executableDirectory(), L"yanflow-asr-smoke.wav"), samples)) {
@@ -695,6 +692,8 @@ private:
         SetWindowRgn(window_, CreateRoundRectRgn(0, 0, kCollapsedSize, kCollapsedSize, 24, 24), TRUE);
         floatingIcon_ = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(2), IMAGE_ICON,
             52, 52, LR_DEFAULTCOLOR | LR_SHARED));
+        listeningIcon_ = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(3), IMAGE_ICON,
+            52, 52, LR_DEFAULTCOLOR | LR_SHARED));
         return true;
     }
 
@@ -763,6 +762,9 @@ private:
             acceptResult(reinterpret_cast<std::wstring*>(lParam));
             return 0;
         case kMessageStatus:
+            if ((static_cast<ListeningState>(wParam) == ListeningState::Listening ||
+                 static_cast<ListeningState>(wParam) == ListeningState::Recognizing) &&
+                !listening_.load(std::memory_order_acquire)) return 0;
             state_ = static_cast<ListeningState>(wParam);
             if (lParam != 0) {
                 std::wstring* messageText = reinterpret_cast<std::wstring*>(lParam);
@@ -774,12 +776,18 @@ private:
             InvalidateRect(window_, nullptr, FALSE);
             return 0;
         case WM_TIMER:
-            if (wParam == kTimerAnimation) {
-                animationPhase_ = (animationPhase_ + 1) % 12;
-                const uint32_t level = capture_.takeLevel();
-                displayLevel_ = std::max(level, displayLevel_ * 3 / 4);
-                if (state_ == ListeningState::Listening || state_ == ListeningState::Recognizing) {
-                    InvalidateRect(window_, nullptr, FALSE);
+            if (wParam == kTimerIdle) {
+                const uint64_t now = GetTickCount64();
+                const uint64_t idleTimeout = smokeMilliseconds_ == -6 ? 2000 : kIdleTimeoutMilliseconds;
+                if (listening_.load(std::memory_order_acquire) &&
+                    now - lastSpeechTick_.load(std::memory_order_acquire) >= idleTimeout) {
+                    // Give a phrase at the boundary one chance to finish VAD/ASR.
+                    // Continuous non-speech noise cannot keep the mic open indefinitely.
+                    if (idleGraceDeadline_ == 0 &&
+                        now - lastCandidateTick_.load(std::memory_order_acquire) <= 3000) {
+                        idleGraceDeadline_ = now + 8000;
+                    }
+                    if (idleGraceDeadline_ == 0 || now >= idleGraceDeadline_) stopListening();
                 }
                 return 0;
             }
@@ -798,6 +806,9 @@ private:
             if (smokeMilliseconds_ == -3) {
                 exitCode_ = state_ == ListeningState::Error ? 41
                     : capture_.capturedSamples() >= static_cast<uint64_t>(kSampleRate / 2) ? 0 : 40;
+            } else if (smokeMilliseconds_ == -6) {
+                exitCode_ = !listening_.load(std::memory_order_acquire) && state_ == ListeningState::Idle
+                    ? 0 : 42;
             }
             DestroyWindow(window_);
             return 0;
@@ -879,6 +890,9 @@ private:
             fallbackText_.clear();
             fallbackIsTranscript_ = false;
             copiedFeedback_ = false;
+            lastSpeechTick_.store(GetTickCount64(), std::memory_order_release);
+            lastCandidateTick_.store(0, std::memory_order_release);
+            idleGraceDeadline_ = 0;
             listening_.store(true, std::memory_order_release);
             state_ = ListeningState::Listening;
             collapseBubble();
@@ -1150,8 +1164,10 @@ private:
         FillRect(memory, &rect, background);
         DeleteObject(background);
 
-        if (floatingIcon_ != nullptr) {
-            DrawIconEx(memory, 10, 10, floatingIcon_, 52, 52, 0, nullptr, DI_NORMAL);
+        HICON currentIcon = (state_ == ListeningState::Listening ||
+            state_ == ListeningState::Recognizing) ? listeningIcon_ : floatingIcon_;
+        if (currentIcon != nullptr) {
+            DrawIconEx(memory, 10, 10, currentIcon, 52, 52, 0, nullptr, DI_NORMAL);
         } else {
             HBRUSH circle = CreateSolidBrush(RGB(30, 86, 214));
             SelectObject(memory, circle);
@@ -1166,23 +1182,6 @@ private:
             MoveToEx(memory, 36, 44, nullptr);
             LineTo(memory, 36, 49);
             DeleteObject(micPen);
-        }
-
-        if (state_ == ListeningState::Listening || state_ == ListeningState::Recognizing) {
-            const COLORREF waveColor = state_ == ListeningState::Recognizing
-                ? RGB(255, 190, 70) : RGB(255, 94, 126);
-            HPEN wavePen = CreatePen(PS_SOLID, 3, waveColor);
-            SelectObject(memory, wavePen);
-            const int energy = std::max(2, static_cast<int>(displayLevel_ * 12 / 1000));
-            for (int index = 0; index < 5; index++) {
-                const int pulse = (animationPhase_ + index * 2) % 10;
-                const int animated = state_ == ListeningState::Recognizing ? 3 + std::abs(5 - pulse) : energy;
-                const int height = std::min(15, animated + (index == 2 ? 4 : index % 2));
-                const int x = 22 + index * 7;
-                MoveToEx(memory, x, 36 - height / 2, nullptr);
-                LineTo(memory, x, 37 + height / 2);
-            }
-            DeleteObject(wavePen);
         }
 
         if (rect.right > 72) {
@@ -1242,17 +1241,22 @@ private:
         int voicedFrames = 0;
         int silentFrames = 0;
         float noiseFloor = 0.004f;
+        float previousInput = 0.0f;
+        float previousFiltered = 0.0f;
         bool wasListening = false;
         while (workerRunning_.load(std::memory_order_acquire)) {
             if (!listening_.load(std::memory_order_acquire)) {
                 if (wasListening && speech && utterance.size() >= static_cast<size_t>(kSampleRate * 0.35f)) {
-                    enqueueUtterance(std::move(utterance), false);
+                    enqueueUtterance(std::move(utterance));
                 }
                 speech = false;
                 voicedFrames = 0;
                 silentFrames = 0;
                 preRoll.clear();
                 utterance.clear();
+                noiseFloor = 0.004f;
+                previousInput = 0.0f;
+                previousFiltered = 0.0f;
                 wasListening = false;
                 Sleep(20);
                 continue;
@@ -1264,9 +1268,14 @@ private:
                 continue;
             }
             double squares = 0.0;
-            for (int16_t sample : frame) {
-                const float normalized = static_cast<float>(sample) / 32768.0f;
-                squares += normalized * normalized;
+            for (int16_t& sample : frame) {
+                const float input = static_cast<float>(sample) / 32768.0f;
+                // A 120 Hz high-pass attenuates ventilation and handling rumble.
+                const float filtered = input - previousInput + 0.954f * previousFiltered;
+                previousInput = input;
+                previousFiltered = filtered;
+                sample = static_cast<int16_t>(std::clamp(filtered * 32768.0f, -32768.0f, 32767.0f));
+                squares += filtered * filtered;
             }
             const float rms = static_cast<float>(std::sqrt(squares / frame.size()));
             const float threshold = std::max(0.0035f, noiseFloor * 2.5f);
@@ -1280,12 +1289,14 @@ private:
                 voicedFrames = voiced ? voicedFrames + 1 : 0;
                 if (voicedFrames >= 3) {
                     speech = true;
+                    lastCandidateTick_.store(GetTickCount64(), std::memory_order_release);
                     utterance.assign(preRoll.begin(), preRoll.end());
                     preRoll.clear();
                     silentFrames = 0;
                 }
             } else {
                 utterance.insert(utterance.end(), frame.begin(), frame.end());
+                if (voiced) lastCandidateTick_.store(GetTickCount64(), std::memory_order_release);
                 silentFrames = voiced ? 0 : silentFrames + 1;
                 const bool endpoint = silentFrames >= 28;
                 const bool maximum = utterance.size() >= kMaximumUtteranceSamples;
@@ -1293,7 +1304,7 @@ private:
                     const size_t tail = static_cast<size_t>(std::min(silentFrames, 12) * kFramesPerBuffer);
                     if (tail < utterance.size()) utterance.resize(utterance.size() - tail);
                     if (utterance.size() >= static_cast<size_t>(kSampleRate * 0.35f)) {
-                        enqueueUtterance(std::move(utterance), false);
+                        enqueueUtterance(std::move(utterance));
                     }
                     utterance.clear();
                     speech = false;
@@ -1347,10 +1358,6 @@ private:
             std::wstring error;
             if (transcribe(utterance.samples, utterance.useVad, text, error) && !text.empty()) {
                 PostMessageW(window_, kMessageResult, 0, reinterpret_cast<LPARAM>(new std::wstring(text)));
-            } else if (error.empty()) {
-                error = L"已检测到语音，但未识别出文本。请靠近麦克风后重试。";
-                PostMessageW(window_, kMessageStatus, static_cast<WPARAM>(ListeningState::Error),
-                    reinterpret_cast<LPARAM>(new std::wstring(error)));
             } else if (!error.empty()) {
                 PostMessageW(window_, kMessageStatus, static_cast<WPARAM>(ListeningState::Error),
                     reinterpret_cast<LPARAM>(new std::wstring(error)));
@@ -1371,6 +1378,10 @@ private:
         if (result == nullptr) return;
         std::wstring text = *result;
         delete result;
+        if (listening_.load(std::memory_order_acquire)) {
+            lastSpeechTick_.store(GetTickCount64(), std::memory_order_release);
+            idleGraceDeadline_ = 0;
+        }
         if (smokeMilliseconds_ != -2 && smokeMilliseconds_ != -4) {
             HWND foreground = GetForegroundWindow();
             if (foreground != nullptr && foreground != window_) {
@@ -1660,6 +1671,7 @@ private:
     HICON applicationIcon_ = nullptr;
     HICON applicationSmallIcon_ = nullptr;
     HICON floatingIcon_ = nullptr;
+    HICON listeningIcon_ = nullptr;
     IUIAutomation* automation_ = nullptr;
     AudioCapture capture_;
     PersistentAsrWorker asrWorker_;
@@ -1667,6 +1679,9 @@ private:
     std::thread inferenceThread_;
     std::atomic<bool> workerRunning_ = false;
     std::atomic<bool> listening_ = false;
+    std::atomic<uint64_t> lastSpeechTick_ = 0;
+    std::atomic<uint64_t> lastCandidateTick_ = 0;
+    uint64_t idleGraceDeadline_ = 0;
     std::mutex queueMutex_;
     std::condition_variable queueChanged_;
     std::deque<QueuedUtterance> utterances_;
@@ -1674,8 +1689,6 @@ private:
     std::wstring fallbackText_;
     std::wstring smokeTranscript_;
     std::wstring lastWrittenPath_;
-    uint32_t displayLevel_ = 0;
-    int animationPhase_ = 0;
     bool targetWasEditable_ = false;
     bool fallbackIsTranscript_ = false;
     bool bubbleExpanded_ = false;

@@ -5,6 +5,6 @@
   "license": "GPL-3.0-only",
   "require": {
     "php": ">=8.4",
-    "typephp-org/native-core": "^0.1.0@alpha"
+    "typephp-org/native-core": "0.1.0-alpha.2"
   }
 }

@@ -21,7 +21,8 @@ if errorlevel 1 exit /b %errorlevel%
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0set-executable-icons.ps1" ^
     -Executable "%REPO_ROOT%\build\artifacts\yanflow.exe" ^
     -ApplicationIcon "%REPO_ROOT%\assets\icons\yanflow-app.ico" ^
-    -FloatingIcon "%REPO_ROOT%\assets\icons\yanflow-floating.ico"
+    -FloatingIcon "%REPO_ROOT%\assets\icons\yanflow-floating.ico" ^
+    -ListeningIcon "%REPO_ROOT%\assets\icons\yanflow-listening.ico"
 if errorlevel 1 exit /b %errorlevel%
 
 if not exist "%DEPS_DIR%\funasr\llama-funasr-sensevoice.exe" (

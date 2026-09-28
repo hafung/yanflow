@@ -38,6 +38,13 @@ function main(): void
         }
         return;
     }
+    if (count($argv) > 1 && $argv[1] === '--idle-smoke') {
+        $exitCode = yanflow_run(-6);
+        if ($exitCode !== 0) {
+            exit($exitCode);
+        }
+        return;
+    }
     if (count($argv) > 1 && $argv[1] === '--readme-demo') {
         $exitCode = yanflow_run(-5);
         if ($exitCode !== 0) {

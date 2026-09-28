@@ -67,7 +67,7 @@ $cmake = $cmakeCommand.Source
 $funasrRuntime = Join-Path $senseVoiceExtract "runtime\llama.cpp"
 $project = Join-Path $repoRoot "app\asr-worker"
 
-& $cmake -S $project -B $buildDir -G Ninja -DCMAKE_BUILD_TYPE=Release `
+& $cmake --fresh -S $project -B $buildDir -G Ninja -DCMAKE_BUILD_TYPE=Release `
     "-DFUNASR_RUNTIME_DIR=$funasrRuntime" "-DLLAMA_CPP_DIR=$llamaExtract"
 if ($LASTEXITCODE -ne 0) { throw "YanFlow worker CMake configure failed" }
 & $cmake --build $buildDir --target yanflow-asr-worker

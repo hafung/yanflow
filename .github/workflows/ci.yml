@@ -8,9 +8,9 @@ permissions:
   contents: write
 
 env:
-  TYPEPHP_VERSION: v0.6.8
-  TYPEPHP_ARCHIVE: tpc_v0.6.8_windows_x64.zip
-  TYPEPHP_SHA256: c312d3c595c1ebca77d451da84cdbfc0ae606655f73a6ed31ec04fb779cc86ba
+  TYPEPHP_VERSION: v0.9.3
+  TYPEPHP_ARCHIVE: tpc_v0.9.3_windows_x64_php8.4.26-zts.zip
+  TYPEPHP_SHA256: 308bde232ea1d25789d6a3a5ed13880298c1b707ef5f0d1b307ef029c2655273
   YANFLOW_SKIP_ASR_SMOKE: 1
 
 jobs:

@@ -18,7 +18,7 @@ if not defined TYPEPHP_HOME (
 )
 if not defined PHP_HOME set "PHP_HOME=%TYPEPHP_HOME%"
 if not defined PHPX_HOME set "PHPX_HOME=%TYPEPHP_HOME%\phpx"
-rem TypePHP v0.6.8 resolves PHPX with PHP is_dir(), which requires slash-normalized paths on Windows.
+rem Keep PHP and PHPX paths slash-normalized for TypePHP's Windows path checks.
 set "PHP_HOME=%PHP_HOME:\=/%"
 set "PHPX_HOME=%PHPX_HOME:\=/%"
 set "PATH=%TYPEPHP_HOME%;%PATH%"

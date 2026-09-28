@@ -27,13 +27,15 @@
 
 纯本地处理，纯 CPU 完成端点检测和识别。不用担心隐私问题，不需要账号、网络、Python、
 PyTorch，更不要求独立显卡。模型由常驻 worker 只加载一次，采集回调只写固定无锁环形
-缓冲；没有临时 WAV，没有每句话一次冷启动。资源占用极低！
+缓冲；没有临时 WAV，没有每句话一次冷启动。识别队列有上限，悬浮窗只在状态变化时重绘。
 
 ### 它会什么
 
 - **全局落字**：记事本、浏览器地址栏、VS Code，以及其他标准 Edit/Document 控件。
 - **不抢焦点**：原生 Win32 无激活悬浮窗；拖动、隐藏、复制、快捷键设置都在手边。
 - **离线端侧**：16 kHz 单声道采集，自适应噪声底、300 ms 预卷、最长 8 秒连续切片。
+- **安静时停下**：30 秒没有确认的人声后关闭麦克风；边界上的一句话最多再等 8 秒完成识别。
+- **减少误触发**：每段录音经过 FSMN-VAD 复核；静音和短促敲击不会直接送入转录。高通滤波减轻低频风噪。
 - **失焦也不失语**：目标不可写时，转录进入向左展开的气泡，可一键复制或写入桌面。
 - **开箱即用**：下载 Release ZIP，解压，双击 `yanflow.exe`。没有安装器，也没有“下一步”。
 
@@ -65,6 +67,8 @@ by incantation—it is simply kept inside deliberate boundaries.
 - **Types system-wide** into Notepad, browser address bars, VS Code, and other Edit/Document controls.
 - **Keeps your focus** with a native non-activating Win32 overlay and configurable global hotkeys.
 - **Stays on-device** with 16 kHz mono capture, adaptive noise floor, 300 ms pre-roll, and 8 s slices.
+- **Stops an idle microphone** after 30 s without confirmed speech, with one brief grace period for a phrase in progress.
+- **Checks speech with FSMN-VAD** before transcription and attenuates low-frequency ventilation rumble.
 - **Catches stray words** in a left-expanding bubble when the target cannot accept text.
 - **Ships ready** as a portable ZIP: extract and run `yanflow.exe`; there is nothing to install.
 
@@ -99,6 +103,7 @@ Useful focused checks / 常用专项验证：
 
 ```powershell
 build\windows\test-yanflow-worker.cmd
+build\windows\test-yanflow-idle.cmd
 build\windows\test-yanflow-pipeline.cmd
 build\windows\test-yanflow-textbox.cmd
 build\windows\test-yanflow-fallback.cmd
@@ -112,6 +117,11 @@ Today YanFlow targets Windows x64 and CPU inference. Automated evidence covers p
 repetition, the full segmentation pipeline, standard text boxes, Edge, VS Code, and the fallback
 bubble. A combined live-human microphone session and a 24–72 hour soak remain future evidence—not
 retroactive folklore.
+
+Single-microphone filtering and VAD can reduce steady fan noise, silence, and brief impacts. They
+cannot reliably isolate a nearby speaker from background voices or cancel room echo without a
+playback reference. CPU load and heat also depend on microphone input and the host machine; the
+automated worker smoke checks short-run working-set drift, not long-term thermal behavior.
 
 YanFlow is GPL-3.0-only. Models and bundled runtimes retain their own licenses; see
 [third-party notices](THIRD-PARTY-NOTICES.md) and the license files included in every release ZIP.

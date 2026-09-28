@@ -107,6 +107,28 @@ try {
         $workingSets += $process.WorkingSet64
     }
 
+    $silencePcm = [byte[]]::new(16000 * 2)
+    $clicksPcm = [byte[]]::new(16000 * 2)
+    for ($offset = 0; $offset -lt $clicksPcm.Length; $offset += 8000) {
+        $clicksPcm[$offset] = 0xff
+        $clicksPcm[$offset + 1] = 0x7f
+    }
+    foreach ($noise in @($silencePcm, $clicksPcm)) {
+        $input.Write([uint32]0x31514659)
+        $input.Write([uint32]($noise.Length / 2))
+        $input.Write([uint32]1)
+        $input.BaseStream.Write($noise, 0, $noise.Length)
+        $input.Flush()
+        $noiseMagic = $output.ReadUInt32()
+        $noiseStatus = $output.ReadUInt32()
+        $noiseBytes = $output.ReadUInt32()
+        [void]$output.ReadUInt64()
+        $noiseText = [Text.Encoding]::UTF8.GetString($output.ReadBytes([int]$noiseBytes))
+        if ($noiseMagic -ne 0x31524659 -or $noiseStatus -ne 0 -or $noiseText.Length -ne 0) {
+            throw "VAD emitted text for non-speech input: $noiseText"
+        }
+    }
+
     $voice = New-Object -ComObject SAPI.SpVoice
     $audioStream = New-Object -ComObject SAPI.SpFileStream
     $audioFormat = New-Object -ComObject SAPI.SpAudioFormat
@@ -148,7 +170,7 @@ try {
     $average = [math]::Round(($elapsed | Measure-Object -Average).Average, 1)
     $memoryDriftMb = [math]::Round(($workingSets[-1] - $workingSets[0]) / 1MB, 1)
     if ($memoryDriftMb -gt 64) { throw "Worker working-set drift too high: $memoryDriftMb MB" }
-    Write-Host "PASS yanflow-worker requests=$Iterations load_ms=$loadMilliseconds infer_avg_ms=$average infer_p95_ms=$($sorted[$p95Index]) working_set_drift_mb=$memoryDriftMb text=$lastText english_words=$englishWords english=$englishText"
+    Write-Host "PASS yanflow-worker requests=$Iterations vad_non_speech=silence,clicks load_ms=$loadMilliseconds infer_avg_ms=$average infer_p95_ms=$($sorted[$p95Index]) working_set_drift_mb=$memoryDriftMb text=$lastText english_words=$englishWords english=$englishText"
 } finally {
     Remove-Item -Force -ErrorAction SilentlyContinue $englishWave
     $output.Dispose()

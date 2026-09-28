@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$Executable,
     [Parameter(Mandatory = $true)][string]$ApplicationIcon,
-    [string]$FloatingIcon = ""
+    [string]$FloatingIcon = "",
+    [string]$ListeningIcon = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -104,6 +105,10 @@ if (-not [string]::IsNullOrWhiteSpace($FloatingIcon)) {
     $FloatingIcon = [IO.Path]::GetFullPath($FloatingIcon)
     if (-not (Test-Path $FloatingIcon)) { throw "Floating icon not found: $FloatingIcon" }
 }
+if (-not [string]::IsNullOrWhiteSpace($ListeningIcon)) {
+    $ListeningIcon = [IO.Path]::GetFullPath($ListeningIcon)
+    if (-not (Test-Path $ListeningIcon)) { throw "Listening icon not found: $ListeningIcon" }
+}
 
 $update = [NativeResourceUpdate]::BeginUpdateResource($Executable, $false)
 if ($update -eq [IntPtr]::Zero) { Throw-LastWin32Error "BeginUpdateResource" }
@@ -112,6 +117,9 @@ try {
     $nextImageId = Set-IcoResource $update $ApplicationIcon 1 1
     if (-not [string]::IsNullOrWhiteSpace($FloatingIcon)) {
         [void](Set-IcoResource $update $FloatingIcon 2 ([math]::Max(101, $nextImageId)))
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ListeningIcon)) {
+        [void](Set-IcoResource $update $ListeningIcon 3 201)
     }
     if (-not [NativeResourceUpdate]::EndUpdateResource($update, $false)) {
         Throw-LastWin32Error "EndUpdateResource"
