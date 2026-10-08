@@ -83,18 +83,21 @@ elevated process because of UIPI; that boundary is intentional.
 
 ## Build / 构建
 
-YanFlow is built with [TypePHP](https://github.com/swoole/typephp) AOT and grows from the
-[TypePHP Native Core](https://github.com/typephp-org/native-core) line of work. On Windows, install
-Visual Studio 2022 Build Tools with C++, then point `TYPEPHP_HOME` at an official TypePHP package:
+YanFlow is a native Windows x64 application written in C++17, using Win32 for the GUI,
+audio capture, hotkeys, and text injection. Both the GUI and recognition worker statically link
+the MSVC runtime; PHP, TypePHP, and a separate VC redistributable are not required.
+On Windows, install Visual Studio 2022 Build Tools with the Desktop development with C++ workload,
+including the Windows SDK and C++ CMake tools (CMake and Ninja):
 
 ```powershell
 build\windows\build-yanflow.cmd
 ```
 
-The script downloads immutable SenseVoice/FSMN resources, verifies SHA-256 values, builds the
-persistent C++ worker and GUI, runs window and ASR smoke tests, then stages
-`build\artifacts\yanflow-windows-x64\`. `TYPEPHP_HOME`, `PHP_HOME`, `PHPX_HOME`,
-`TYPEPHP_RUNTIME_DIR`, and `VS_BUILD_TOOLS` remain overridable.
+The script downloads pinned SenseVoice/FSMN resources, verifies SHA-256 values, builds the
+persistent C++ worker and native GUI with CMake, embeds the icons as Windows resources,
+then stages a fresh `build\artifacts\yanflow-windows-x64\` and runs window and ASR smoke tests.
+`VS_BUILD_TOOLS` remains overridable. The previous TypePHP implementation is preserved on
+the `history/typephp-2026-10-08` branch.
 
 Pushes and pull requests build that same portable package on GitHub Actions. A `v*` tag also creates
 a GitHub Release with the ZIP and `SHA256SUMS` automatically.
@@ -103,6 +106,7 @@ Useful focused checks / 常用专项验证：
 
 ```powershell
 build\windows\test-yanflow-worker.cmd
+build\windows\test-yanflow-native.cmd
 build\windows\test-yanflow-idle.cmd
 build\windows\test-yanflow-pipeline.cmd
 build\windows\test-yanflow-textbox.cmd
@@ -110,6 +114,10 @@ build\windows\test-yanflow-fallback.cmd
 build\windows\test-yanflow-edge.cmd
 build\windows\test-yanflow-vscode.cmd
 ```
+
+The native-package check verifies PE imports, creates `build\artifacts\YanFlow-native-windows-x64.zip`
+and its `SHA256SUMS-native.txt`, then extracts and runs the application from a path containing
+spaces and Unicode. It also checks the missing-wave and missing-worker exit codes.
 
 ## Boundaries / 边界
 

@@ -24,6 +24,8 @@
 #include <vector>
 
 #ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #include <fcntl.h>
 #include <io.h>
 #endif
@@ -228,7 +230,7 @@ private:
 };
 } // namespace
 
-int main(int argc,char**argv){
+static int worker_main(int argc,char**argv){
   setvbuf(stderr,nullptr,_IONBF,0);
   ggml_time_init();
 #ifdef _WIN32
@@ -260,3 +262,26 @@ int main(int argc,char**argv){
   }
   return 0;
 }
+
+#ifdef _WIN32
+// ggml opens UTF-8 paths with _wfopen. The narrow CRT argv uses the active code
+// page, so obtain UTF-16 arguments directly and explicitly encode them as UTF-8.
+int wmain(int argc,wchar_t**argv){
+  std::vector<std::string> utf8_arguments;
+  utf8_arguments.reserve(argc);
+  for(int i=0;i<argc;i++){
+    int bytes=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,argv[i],-1,nullptr,0,nullptr,nullptr);
+    if(bytes==0)return 2;
+    std::string argument(bytes,'\0');
+    if(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,argv[i],-1,argument.data(),bytes,nullptr,nullptr)==0)return 2;
+    argument.pop_back();
+    utf8_arguments.push_back(std::move(argument));
+  }
+  std::vector<char*> arguments;
+  arguments.reserve(argc);
+  for(auto&argument:utf8_arguments)arguments.push_back(argument.data());
+  return worker_main(argc,arguments.data());
+}
+#else
+int main(int argc,char**argv){return worker_main(argc,argv);}
+#endif

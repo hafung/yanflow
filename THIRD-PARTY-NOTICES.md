@@ -5,9 +5,8 @@ licensed components and model weights:
 
 - The initial YanFlow implementation was developed in TypePHP Native Core under MIT; its retained
   license notice is in `LICENSES/MIT-native-core.txt`.
-- TypePHP compiler/runtime: GPL-3.0, from <https://github.com/swoole/typephp>. The exact upstream
-  license is copied into release archives as `LICENSE-TypePHP.txt`.
-- PHP runtime: PHP License, copied into release archives as `LICENSE-PHP.txt`.
+- The current native C++ release does not bundle TypePHP or PHP. The earlier implementation is
+  preserved on the `history/typephp-2026-10-08` branch.
 - FunASR llama.cpp runtime and YanFlow's persistent-worker foundation: MIT; details and retained
   notices are in `app/asr-worker/THIRD-PARTY-NOTICES.txt`.
 - SenseVoiceSmall GGUF and FSMN-VAD GGUF: distributed by FunAudioLLM. Consult their model cards and

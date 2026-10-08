@@ -1,6 +1,6 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
-#include <phpx.h>
+#include "yanflow.h"
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
@@ -23,14 +23,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
-#pragma comment(lib, "winmm.lib")
-#pragma comment(lib, "ole32.lib")
-#pragma comment(lib, "comctl32.lib")
-#pragma comment(lib, "shell32.lib")
-#pragma comment(lib, "uiautomationcore.lib")
-
-using namespace php;
 
 namespace {
 
@@ -1706,13 +1698,13 @@ private:
 
 } // namespace
 
-Int php_yanflow_run(Int smokeMilliseconds)
+int runYanFlow(int smokeMilliseconds)
 {
-    YanFlowApp app(static_cast<int>(smokeMilliseconds));
-    return static_cast<Int>(app.run());
+    YanFlowApp app(smokeMilliseconds);
+    return app.run();
 }
 
-Int php_yanflow_asr_smoke()
+int runAsrSmoke()
 {
     const std::wstring root = executableDirectory();
     const std::wstring path = joinPath(root, L"yanflow-asr-smoke.wav");

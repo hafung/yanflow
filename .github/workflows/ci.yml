@@ -2,15 +2,15 @@ name: Windows package
 
 on:
   push:
+    branches: ['main', 'refactor/windows-native-cpp']
     tags: ['v*']
+  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 env:
-  TYPEPHP_VERSION: v0.9.3
-  TYPEPHP_ARCHIVE: tpc_v0.9.3_windows_x64_php8.4.26-zts.zip
-  TYPEPHP_SHA256: 308bde232ea1d25789d6a3a5ed13880298c1b707ef5f0d1b307ef029c2655273
   YANFLOW_SKIP_ASR_SMOKE: 1
 
 jobs:
@@ -27,21 +27,6 @@ jobs:
           path: build/deps/yanflow
           key: yanflow-speech-v1-${{ runner.os }}
 
-      - name: Install pinned TypePHP toolchain
-        shell: pwsh
-        run: |
-          $archive = Join-Path $env:RUNNER_TEMP $env:TYPEPHP_ARCHIVE
-          Invoke-WebRequest "https://github.com/swoole/typephp/releases/download/$env:TYPEPHP_VERSION/$env:TYPEPHP_ARCHIVE" -OutFile $archive
-          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
-          if ($actual -ne $env:TYPEPHP_SHA256) { throw "TypePHP checksum mismatch: $actual" }
-          $root = Join-Path $env:RUNNER_TEMP "typephp"
-          Expand-Archive -Force $archive $root
-          $typephpDir = (Get-ChildItem $root -Directory | Select-Object -First 1).FullName
-          "TYPEPHP_HOME=$typephpDir" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "TYPEPHP_RUNTIME_DIR=$typephpDir" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "PHP_HOME=$typephpDir" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "PHPX_HOME=$typephpDir\phpx" | Out-File -FilePath $env:GITHUB_ENV -Append
-
       - name: Build and smoke-test portable package
         shell: cmd
         run: build\windows\build-yanflow.cmd
@@ -51,6 +36,10 @@ jobs:
         run: |
           call build\windows\test-yanflow-worker.cmd -Iterations 0
           if errorlevel 1 exit /b %errorlevel%
+
+      - name: Verify native imports and extracted portable package
+        shell: cmd
+        run: build\windows\test-yanflow-native.cmd
 
       - name: Create release archive
         shell: pwsh

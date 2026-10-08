@@ -1,11 +1,14 @@
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public static class YanFlowVsCodeFocus {
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 }
 "@
 
@@ -56,16 +59,34 @@ try {
     if (-not [YanFlowVsCodeFocus]::SetForegroundWindow($editor.MainWindowHandle)) {
         throw "Could not focus isolated VS Code window"
     }
-    Start-Sleep -Milliseconds 700
-    [Windows.Forms.SendKeys]::SendWait("^{END}")
-    Start-Sleep -Milliseconds 200
+    # A top-level Electron window can appear before its editor is ready. Wait for
+    # an editable focus instead of relying on a fixed delay.
+    $editableReady = $false
+    $deadline = (Get-Date).AddSeconds(15)
+    do {
+        [void][YanFlowVsCodeFocus]::SetForegroundWindow($editor.MainWindowHandle)
+        [Windows.Forms.SendKeys]::SendWait("^1")
+        [Windows.Forms.SendKeys]::SendWait("^{END}")
+        Start-Sleep -Milliseconds 200
+        $focused = [Windows.Automation.AutomationElement]::FocusedElement
+        if ($null -ne $focused -and
+            [YanFlowVsCodeFocus]::GetForegroundWindow() -eq $editor.MainWindowHandle) {
+            $type = $focused.Current.ControlType
+            $editableReady = $type -eq [Windows.Automation.ControlType]::Edit -or
+                $type -eq [Windows.Automation.ControlType]::Document
+        }
+    } while (-not $editableReady -and (Get-Date) -lt $deadline)
+    if (-not $editableReady) { throw "Isolated VS Code editor did not acquire editable focus" }
 
     $process = Start-Process $yanflow -ArgumentList "--e2e-smoke" -PassThru
     if (-not $process.WaitForExit(15000)) {
         $process.Kill()
         throw "YanFlow VS Code E2E timed out"
     }
-    if ($process.ExitCode -ne 0) { throw "YanFlow VS Code E2E exited with $($process.ExitCode)" }
+    if ($process.ExitCode -ne 0) {
+        $details = if (Test-Path $diagnostic) { [IO.File]::ReadAllText($diagnostic) } else { "no YanFlow diagnostic" }
+        throw "YanFlow VS Code E2E exited with $($process.ExitCode): $details"
+    }
 
     [void][YanFlowVsCodeFocus]::SetForegroundWindow($editor.MainWindowHandle)
     Start-Sleep -Milliseconds 200

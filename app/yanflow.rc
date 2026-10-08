@@ -1,0 +1,5 @@
+#include <windows.h>
+
+1 ICON "yanflow-app.ico"
+2 ICON "yanflow-floating.ico"
+3 ICON "yanflow-listening.ico"
