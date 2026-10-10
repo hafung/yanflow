@@ -14,8 +14,11 @@
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "gguf.h"
+#include "../asr-protocol.h"
+#include "short-vad.h"
 
 #include <cmath>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -118,12 +121,13 @@ namespace {
 constexpr uint32_t REQUEST_MAGIC = 0x31514659;  // YFQ1, little endian
 constexpr uint32_t RESPONSE_MAGIC = 0x31524659; // YFR1
 constexpr uint32_t READY_MAGIC = 0x31574659;    // YFW1
-constexpr uint32_t PROTOCOL_VERSION = 1;
+constexpr uint32_t PROTOCOL_VERSION = yanflow::kAsrProtocolVersion;
 constexpr uint32_t REQUEST_USE_VAD = 1;
 constexpr uint32_t MAX_SAMPLES = FS * 60;
 
 struct request_header { uint32_t magic; uint32_t samples; uint32_t flags; };
 struct ready_header { uint32_t magic; uint32_t version; uint32_t status; };
+struct timed_token { uint32_t begin, end; std::string piece; };
 
 static bool read_exact(void* destination,size_t bytes){
   return bytes==0 || fread(destination,1,bytes,stdin)==bytes;
@@ -132,11 +136,20 @@ static bool write_exact(const void* source,size_t bytes){
   if(bytes!=0 && fwrite(source,1,bytes,stdout)!=bytes)return false;
   return fflush(stdout)==0;
 }
-static bool write_response(uint32_t status,const std::string& text,uint64_t elapsed_us){
+static bool write_response(uint32_t status,const std::string& text,uint64_t elapsed_us,
+    const std::vector<timed_token>* tokens=nullptr){
   const uint32_t magic=RESPONSE_MAGIC,bytes=(uint32_t)text.size();
-  return write_exact(&magic,sizeof(magic))&&write_exact(&status,sizeof(status))&&
+  if(!(write_exact(&magic,sizeof(magic))&&write_exact(&status,sizeof(status))&&
     write_exact(&bytes,sizeof(bytes))&&write_exact(&elapsed_us,sizeof(elapsed_us))&&
-    write_exact(text.data(),text.size());
+    write_exact(text.data(),text.size())))return false;
+  if(tokens){
+    const uint32_t count=(uint32_t)tokens->size();if(!write_exact(&count,sizeof(count)))return false;
+    for(const auto& token:*tokens){
+      yanflow::AsrTokenHeader header{token.begin,token.end,(uint32_t)token.piece.size()};
+      if(!write_exact(&header,sizeof(header))||!write_exact(token.piece.data(),token.piece.size()))return false;
+    }
+  }
+  return true;
 }
 
 class sensevoice_worker {
@@ -169,11 +182,17 @@ public:
     return true;
   }
 
-  bool transcribe(const std::vector<float>& wav,bool use_vad,std::string& output){
+  bool transcribe(const std::vector<float>& wav,bool use_vad,std::string& output,
+      std::vector<timed_token>& tokens,bool short_hold){
     output.clear();
+    tokens.clear();
     std::vector<std::pair<int,int>> segments;
     if(use_vad){
-      if(vad_path_.empty()||!funasr_vad_segments(vad_path_,wav,30000,segments,threads_))return false;
+      if(vad_path_.empty())return false;
+      const bool ok=short_hold && wav.size()<=FS
+        ? yanflow_short_vad_segments(vad_path_,wav,30000,segments,threads_)
+        : funasr_vad_segments(vad_path_,wav,30000,segments,threads_);
+      if(!ok)return false;
     }else{
       segments.push_back({0,(int)((int64_t)wav.size()*1000/FS)});
     }
@@ -183,14 +202,17 @@ public:
       if(end-begin<WINLEN)continue;
       std::vector<float> clip(wav.begin()+begin,wav.begin()+end);
       int frames=0;std::vector<float> features=compute_fbank(std::move(clip),frames);
-      std::string text;if(!run_segment(features,frames,text))return false;
+      std::string text;std::vector<timed_token> part;
+      if(!run_segment(features,frames,text,part,end-begin))return false;
       output+=text;
+      for(auto& token:part){token.begin+=(uint32_t)begin;token.end+=(uint32_t)begin;tokens.push_back(std::move(token));}
     }
     return true;
   }
 
 private:
-  bool run_segment(const std::vector<float>& fb,int T,std::string& output){
+  bool run_segment(const std::vector<float>& fb,int T,std::string& output,
+      std::vector<timed_token>& tokens,int sample_count){
     const int F=560,D=model_.c.d_model,V=model_.c.vocab,N=nq_+T;
     std::vector<float> input((size_t)N*F);
     for(int i=0;i<nq_;i++)memcpy(&input[(size_t)i*F],&embedding_[(size_t)qtok_[i]*F],F*sizeof(float));
@@ -213,7 +235,20 @@ private:
     if(ok){std::vector<float> values((size_t)V*N);ggml_backend_tensor_get(logits,values.data(),0,ggml_nbytes(logits));int previous=-1;
       for(int n=0;n<N;n++){const float*column=&values[(size_t)n*V];int best_id=0;float best=column[0];
         for(int v=1;v<V;v++)if(column[v]>best){best=column[v];best_id=v;}
-        if(best_id!=previous&&best_id!=model_.c.blank)ids.push_back(best_id);previous=best_id;}}
+        if(best_id!=previous&&best_id!=model_.c.blank){
+          ids.push_back(best_id);
+          if(best_id>=0&&best_id<(int)vocab_.size()){
+            const auto& piece=vocab_[best_id];
+            if(!(piece.size()>=2&&piece[0]=='<'&&piece[1]=='|')){
+              const int begin=std::clamp((n-nq_)*LFR_N*SHIFT,0,sample_count);
+              const int end=std::clamp((n-nq_+1)*LFR_N*SHIFT,begin,sample_count);
+              tokens.push_back({(uint32_t)begin,(uint32_t)end,piece});
+            }
+          }
+        }else if(best_id==previous&&best_id!=model_.c.blank&&best_id>=0&&best_id<(int)vocab_.size()&&!tokens.empty()&&tokens.back().piece==vocab_[best_id]){
+          tokens.back().end=(uint32_t)std::clamp((n-nq_+1)*LFR_N*SHIFT,(int)tokens.back().begin,sample_count);
+        }
+        previous=best_id;}}
     ggml_gallocr_free(allocator);ggml_free(c);
     if(!ok)return false;
     output=detok_sv(ids,vocab_,false);return true;
@@ -256,9 +291,12 @@ static int worker_main(int argc,char**argv){
     std::vector<int16_t> pcm(request.samples);if(!read_exact(pcm.data(),pcm.size()*sizeof(int16_t)))return 6;
     fprintf(stderr,"yanflow-worker: request body ready\n");
     std::vector<float> wav(pcm.size());for(size_t i=0;i<pcm.size();i++)wav[i]=(float)pcm[i]/32768.0f;
-    int64_t started=ggml_time_us();std::string text;
-    bool ok=worker.transcribe(wav,(request.flags&REQUEST_USE_VAD)!=0,text);
-    if(!write_response(ok?0u:1u,text,(uint64_t)(ggml_time_us()-started)))return 7;
+    if(request.flags & ~(yanflow::kAsrUseVad|yanflow::kAsrTimedTokens|yanflow::kAsrShortHold))return 5;
+    if((request.flags&yanflow::kAsrShortHold)&&!(request.flags&REQUEST_USE_VAD))return 5;
+    int64_t started=ggml_time_us();std::string text;std::vector<timed_token> tokens;
+    bool ok=worker.transcribe(wav,(request.flags&REQUEST_USE_VAD)!=0,text,tokens,(request.flags&yanflow::kAsrShortHold)!=0);
+    if(!write_response(ok?0u:1u,text,(uint64_t)(ggml_time_us()-started),
+        (request.flags&yanflow::kAsrTimedTokens)?&tokens:nullptr))return 7;
   }
   return 0;
 }

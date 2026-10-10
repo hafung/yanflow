@@ -1,0 +1,13 @@
+# Development profile; selected by application, always protects code syntax.
+case	onnx	ONNX
+case	onnxruntime	ONNXRuntime
+case	cmake	CMake
+case	cuda	CUDA
+case	msvc	MSVC
+case	json	JSON
+case	yaml	YAML
+case	sql	SQL
+case	http	HTTP
+case	https	HTTPS
+case	cpu	CPU
+case	gpu	GPU

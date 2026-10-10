@@ -72,7 +72,7 @@ try {
     $version = $output.ReadUInt32()
     $readyStatus = $output.ReadUInt32()
     $loadMilliseconds = $stopwatch.ElapsedMilliseconds
-    if ($readyMagic -ne 0x31574659 -or $version -ne 1 -or $readyStatus -ne 0) {
+    if ($readyMagic -ne 0x31574659 -or $version -ne 2 -or $readyStatus -ne 0) {
         throw "Invalid worker handshake"
     }
     if ($Iterations -eq 0) {

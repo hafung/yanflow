@@ -7,6 +7,10 @@ Source: https://github.com/QwenAudio/SenseVoice/tree/runtime-llamacpp-v0.1.9/run
 License: MIT
 Copyright (c) 2025 FunASR
 
+YanFlow's short-vad.cpp derives its unchanged neural inference graph from this
+pinned revision, with a separate decision rule for explicit short hold recordings.
+The downloaded upstream sources and models are not modified.
+
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights

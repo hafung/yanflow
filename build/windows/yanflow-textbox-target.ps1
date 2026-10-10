@@ -19,9 +19,23 @@ $textbox.Font = [Drawing.Font]::new("Microsoft YaHei UI", 16)
 $textbox.Text = "YANFLOW-E2E:"
 $textbox.SelectionStart = $textbox.TextLength
 $form.Controls.Add($textbox)
+$form.ActiveControl = $textbox
+$form.Add_Activated({ [void]$textbox.Focus() })
 $timer = [Windows.Forms.Timer]::new()
 $timer.Interval = 50
 $timer.Add_Tick({
+    if ($form.ContainsFocus -and -not $textbox.Focused) {
+        $form.ActiveControl = $textbox
+        [void]$textbox.Focus()
+    }
+    $focusState = [ordered]@{
+        form_visible = $form.Visible
+        form_contains_focus = $form.ContainsFocus
+        textbox_focused = $textbox.Focused
+        textbox_can_focus = $textbox.CanFocus
+        active_is_textbox = ($form.ActiveControl -eq $textbox)
+    } | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText("$ReadyFile.focus.json", $focusState)
     if ($textbox.Text.Contains($expected)) {
         [IO.File]::WriteAllText($ResultFile, $textbox.Text, [Text.UTF8Encoding]::new($false))
         $timer.Stop()
@@ -29,8 +43,9 @@ $timer.Add_Tick({
     }
 })
 $form.Add_Shown({
-    $textbox.Focus()
-    [IO.File]::WriteAllText($ReadyFile, [string]$PID)
+    [void]$textbox.Focus()
+    $handles = @{ pid = $PID; window = $form.Handle.ToInt64(); editor = $textbox.Handle.ToInt64() } | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText($ReadyFile, $handles)
     $timer.Start()
 })
 [void]$form.ShowDialog()

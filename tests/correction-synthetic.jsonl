@@ -1,0 +1,8 @@
+{"id":"case","raw":"使用 openai chatgpt sensevoice 和 asr api。","expected":"使用 OpenAI ChatGPT SenseVoice 和 ASR API。"}
+{"id":"clean","raw":"今天心情很好，去公园散步。","expected":"今天心情很好，去公园散步。"}
+{"id":"mixed-clean","raw":"OpenAI API 返回 404，Win32 与 C++ 保持原样。","expected":"OpenAI API 返回 404，Win32 与 C++ 保持原样。"}
+{"id":"code","raw":"const auto 新情 = openai(); // 新情","expected":"const auto 新情 = openai(); // 新情"}
+{"id":"inline-code","raw":"保留 `openai 新情 123` 和 https://openai.com/v1。","expected":"保留 `openai 新情 123` 和 https://openai.com/v1。"}
+{"id":"identifier","raw":"my_openai openai2 oasr foo@example.com C:\\openai\\asr.cpp","expected":"my_openai openai2 oasr foo@example.com C:\\openai\\asr.cpp"}
+{"id":"chinese-error","raw":"今天新情很好","expected":"今天心情很好"}
+{"id":"chinese-error-2","raw":"你找到你最喜欢的工作，我也很高心。","expected":"你找到你最喜欢的工作，我也很高兴。"}

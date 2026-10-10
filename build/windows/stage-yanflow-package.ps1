@@ -15,6 +15,24 @@ $files = @{
     "LICENSE-MIT-native-core.txt" = Join-Path $repoRoot "LICENSES\MIT-native-core.txt"
     "LICENSE-YanFlow.txt" = Join-Path $repoRoot "LICENSE"
     "README.md" = Join-Path $repoRoot "README.md"
+    "dictionary.tsv" = Join-Path $repoRoot "assets\dictionary.tsv"
+    "dictionary-development.tsv" = Join-Path $repoRoot "assets\dictionary-development.tsv"
+    "docs\text-correction.md" = Join-Path $repoRoot "docs\text-correction.md"
+}
+# Optional CSC resources are staged only as a complete app-local bundle.
+$csc = Join-Path $dependencies "csc"
+if (Test-Path -LiteralPath $csc) {
+    foreach ($required in @("yanflow-csc-worker.exe", "yanflow-onnxruntime.dll", "model.onnx", "vocab.txt", "SHA256SUMS", "LICENSE-onnxruntime.txt", "NOTICE-onnxruntime.txt", "README-model.md", "LICENSE-model.txt", "NOTICES.md", "msvcp140.dll", "msvcp140_1.dll", "vcruntime140.dll", "vcruntime140_1.dll")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $csc $required))) { throw "Incomplete optional CSC bundle: $required" }
+    }
+    foreach ($entry in Get-ChildItem -LiteralPath $csc -File) {
+        if ($entry.Name -ne "SHA256SUMS") {
+            $expected = (Get-Content -LiteralPath (Join-Path $csc "SHA256SUMS") | Where-Object { $_.EndsWith("  " + $entry.Name) })
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $entry.FullName).Hash.ToLowerInvariant()
+            if (-not $expected -or $expected.Substring(0, 64) -ne $actual) { throw "CSC bundle checksum mismatch: $($entry.Name)" }
+        }
+        $files["csc\" + $entry.Name] = $entry.FullName
+    }
 }
 foreach ($source in $files.Values) {
     if (-not (Test-Path -LiteralPath $source -PathType Leaf) -or (Get-Item -LiteralPath $source).Length -eq 0) {

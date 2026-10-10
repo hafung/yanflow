@@ -6,3 +6,4 @@
 yanflow.ini
 *.partial
 *.obj
+__pycache__/

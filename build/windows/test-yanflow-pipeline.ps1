@@ -1,3 +1,4 @@
+param([switch]$Hold)
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms
 
@@ -12,7 +13,8 @@ foreach ($path in @($yanflow, $sample)) {
 $savedClipboard = [Windows.Forms.Clipboard]::GetDataObject()
 try {
     Copy-Item -Force $sample $fixture
-    $process = Start-Process $yanflow -ArgumentList "--pipeline-smoke" -PassThru
+    $option = if ($Hold) { "--hold-pipeline-smoke" } else { "--pipeline-smoke" }
+    $process = Start-Process $yanflow -ArgumentList $option -PassThru
     if (-not $process.WaitForExit(15000)) {
         $process.Kill()
         throw "YanFlow capture-to-endpoint pipeline timed out"
@@ -22,7 +24,7 @@ try {
     if ([string]::IsNullOrWhiteSpace($actual)) { throw "Pipeline produced an empty transcript" }
     $expected = -join @([char]0x6ee8, [char]0x6d77, [char]0x65b0, [char]0x533a, [char]0x6709, [char]0x623f)
     if (-not $actual.Contains($expected)) { throw "Pipeline transcript was incomplete: $actual" }
-    Write-Host "PASS yanflow-pipeline ring=pcm16 input_level=25pct endpoint=stop-flush asr=sensevoice text=$actual"
+    Write-Host "PASS yanflow-pipeline hold=$Hold ring=pcm16 input_level=25pct endpoint=stop-flush asr=sensevoice text=$actual"
 } finally {
     Remove-Item -Force -ErrorAction SilentlyContinue $fixture
     if ($null -ne $savedClipboard) {

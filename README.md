@@ -21,7 +21,7 @@
 
 ## 中文
 
-言流是 Windows 上的全局实时语音转录工具。按下 `Ctrl + Alt + Space` 开始说，结果会
+言流是 Windows 上的全局实时语音转录工具。默认按住 `Ctrl + Win` 录音，松开识别，结果会
 落进此刻正在编辑的地方；没有合适的输入框时，它就把文字留在一枚可复制、可写入 TXT
 的气泡里。
 
@@ -34,6 +34,8 @@ PyTorch，更不要求独立显卡。模型由常驻 worker 只加载一次，�
 - **全局落字**：记事本、浏览器地址栏、VS Code，以及其他标准 Edit/Document 控件。
 - **不抢焦点**：原生 Win32 无激活悬浮窗；拖动、隐藏、复制、快捷键设置都在手边。
 - **离线端侧**：16 kHz 单声道采集，自适应噪声底、300 ms 预卷、最长 8 秒连续切片。
+- **保护切片边界**：长录音优先在静音附近切分；连续语音使用小幅重叠和 CTC 时间对齐，单次推理仍不超过 8 秒。
+- **短词也提交**：按住模式单独支持短词，经过较严格的人声复核；静音和短促敲击仍被过滤。
 - **安静时停下**：30 秒没有确认的人声后关闭麦克风；边界上的一句话最多再等 8 秒完成识别。
 - **减少误触发**：每段录音经过 FSMN-VAD 复核；静音和短促敲击不会直接送入转录。高通滤波减轻低频风噪。
 - **失焦也不失语**：目标不可写时，转录进入向左展开的气泡，可一键复制或写入桌面。
@@ -43,7 +45,20 @@ PyTorch，更不要求独立显卡。模型由常驻 worker 只加载一次，�
 
 1. 从 [Releases](https://github.com/hafung/yanflow/releases/latest) 下载 `windows-x64.zip`。
 2. 解压到任意可写目录，运行 `yanflow.exe`。
-3. `Ctrl + Alt + Space` 开始，`Ctrl + Alt + S` 停止；右键悬浮按钮可以改键。
+3. 按住 `Ctrl + Win` 录音，松开任一键识别。免按住模式仍用 `Ctrl + Alt + Space` 开始、
+   `Ctrl + Alt + S` 停止；右键悬浮按钮可以改键或关闭按住模式。按住模式最长 60 秒。
+
+### 保守纠错
+
+词典先做明确的大小写规范和术语映射；音近词必须列出误识别形式和同句上下文，默认不做
+模糊猜测。右键选择“编辑自定义词典”，保存后下一次识别生效。MacBERT4CSC 是默认关闭的
+可选本地 C++ worker，只接受高置信度中文单字替换，并保护词典术语、英文、数字和可识别的代码片段。
+资源缺失、超时或异常时保留第一阶段结果。基础包仍不需要 Python 或额外运行时安装。
+
+右键“保存最近识别对照”可导出原始 ASR 和最终文本，人工校对后评测 CER 和误改。
+右键“纠正并记住”可确认误词→正确词，默认只用于这次录音的目标应用，并复制本次正确文本。
+“应用词库”可选择自动、通用或开发词库；应用专用词库叠加在所选词库上，升级不会覆盖个人规则。
+启用可选模型、词典格式及三阶段评测方法见 [纠错说明](docs/text-correction.md)。
 
 Windows 可能在首次使用麦克风时请求权限。普通权限进程不能向管理员权限窗口注入文本，
 这是 Windows UIPI 的边界，不是言流在故作矜持。
@@ -53,7 +68,7 @@ Windows 可能在首次使用麦克风时请求权限。普通权限进程不能
 Some words should not have to leave the room before they become text.
 
 YanFlow is a system-wide voice layer for Windows. It floats above every app without stealing
-focus. Press `Ctrl + Alt + Space`, speak, and the transcript lands in whatever you are editing.
+focus. Hold `Ctrl + Win` to record and release to recognize; the transcript lands in whatever you are editing.
 If there is no writable target, the words wait in a compact bubble—ready to copy or save as TXT.
 
 Its “cloud” is the few centimetres of air above your desk. SenseVoiceSmall Q8 and FSMN-VAD run
@@ -76,7 +91,14 @@ by incantation—it is simply kept inside deliberate boundaries.
 
 1. Download the `windows-x64.zip` from [Releases](https://github.com/hafung/yanflow/releases/latest).
 2. Extract it to any writable directory and run `yanflow.exe`.
-3. Start with `Ctrl + Alt + Space`; stop with `Ctrl + Alt + S`. Right-click the orb to remap them.
+3. Hold `Ctrl + Win` to record; release either key to recognize (60 s maximum).
+   Hands-free mode still starts with `Ctrl + Alt + Space` and stops with `Ctrl + Alt + S`.
+   Right-click the orb to remap hands-free keys or disable hold mode.
+
+An editable dictionary normalizes explicit terms conservatively. Optional MacBERT4CSC is disabled
+by default and only accepts tightly gated Chinese character edits; dictionary terms, English,
+numbers, and recognizable code are protected. Export the last raw/final pair from the orb menu to
+measure improvements against a human transcript. See [correction details](docs/text-correction.md).
 
 Windows may request microphone permission on first use. A normal process cannot inject text into an
 elevated process because of UIPI; that boundary is intentional.
@@ -113,11 +135,17 @@ build\windows\test-yanflow-textbox.cmd
 build\windows\test-yanflow-fallback.cmd
 build\windows\test-yanflow-edge.cmd
 build\windows\test-yanflow-vscode.cmd
+build\windows\test-yanflow-hold.cmd
+build\windows\test-yanflow-correction.cmd
+build\windows\test-yanflow-accuracy.cmd
 ```
 
 The native-package check verifies PE imports, creates `build\artifacts\YanFlow-native-windows-x64.zip`
 and its `SHA256SUMS-native.txt`, then extracts and runs the application from a path containing
 spaces and Unicode. It also checks the missing-wave and missing-worker exit codes.
+When the optional CSC bundle is present, it verifies its app-local DLL dependencies and runs the
+actual model from the extracted path. To build that bundle, run `build\windows\setup-yanflow-csc.cmd`,
+then `build\windows\build-yanflow.cmd`; ONNX Runtime and the model are pinned and SHA-256 checked.
 
 ## Boundaries / 边界
 
@@ -125,6 +153,14 @@ Today YanFlow targets Windows x64 and CPU inference. Automated evidence covers p
 repetition, the full segmentation pipeline, standard text boxes, Edge, VS Code, and the fallback
 bubble. A combined live-human microphone session and a 24–72 hour soak remain future evidence—not
 retroactive folklore.
+Hold-mode automated evidence uses injected PCM and a key-state smoke. Physical modifier chords,
+Start-menu masking, session lock/resume, and a live human hold-to-record session require manual
+Windows validation. Synthetic correction fixtures establish guard behavior, not a lower live-ASR
+error rate; that requires paired real speech and human transcripts.
+Accuracy smoke covers quiet and forced boundaries in repeated 19.2 s PCM fixtures, a 300 ms speech
+fragment through capture/flush/VAD/ASR, short silence/tap rejection, and the native correction dialog
+with dictionary persistence and application isolation. CTC times are approximate; isolated syllables
+can still be misrecognized. These fixtures do not establish live microphone accuracy or overall CER gains.
 
 Single-microphone filtering and VAD can reduce steady fan noise, silence, and brief impacts. They
 cannot reliably isolate a nearby speaker from background voices or cancel room echo without a

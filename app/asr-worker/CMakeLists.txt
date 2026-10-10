@@ -19,7 +19,7 @@ set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
 
 add_subdirectory("${LLAMA_CPP_DIR}/ggml" "${CMAKE_BINARY_DIR}/ggml" EXCLUDE_FROM_ALL)
 
-add_executable(yanflow-asr-worker yanflow-asr-worker.cpp)
+add_executable(yanflow-asr-worker yanflow-asr-worker.cpp short-vad.cpp short-vad.h ../asr-protocol.h)
 target_include_directories(yanflow-asr-worker PRIVATE "${FUNASR_RUNTIME_DIR}/funasr-common")
 target_link_libraries(yanflow-asr-worker PRIVATE ggml)
 if(MSVC)

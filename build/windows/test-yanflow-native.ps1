@@ -6,7 +6,9 @@ $archive = Join-Path $artifacts "YanFlow-native-windows-x64.zip"
 $sample = Join-Path $repoRoot "build\deps\yanflow\source\sensevoice-v0.1.9\runtime\llama.cpp\tests\sample.wav"
 $dumpbin = (Get-Command dumpbin.exe -ErrorAction Stop).Source
 
-foreach ($relativePath in @("yanflow.exe", "funasr\yanflow-asr-worker.exe")) {
+$executables = @("yanflow.exe", "funasr\yanflow-asr-worker.exe")
+if (Test-Path (Join-Path $package "csc")) { $executables += "csc\yanflow-csc-worker.exe" }
+foreach ($relativePath in $executables) {
     $executable = Join-Path $package $relativePath
     $headers = (& $dumpbin /headers $executable) -join "`n"
     if ($LASTEXITCODE -ne 0 -or $headers -notmatch "8664 machine") {
@@ -30,8 +32,23 @@ foreach ($relativePath in @("yanflow.exe", "funasr\yanflow-asr-worker.exe")) {
     }
     Write-Host "PASS native-imports executable=$relativePath dlls=$($imports -join ',')"
 }
-if (@(Get-ChildItem -LiteralPath $package -Recurse -File -Filter *.dll).Count -ne 0 -or
-    (Test-Path (Join-Path $package "php.ini"))) {
+$allowedCscDlls = @("yanflow-onnxruntime.dll", "msvcp140.dll", "msvcp140_1.dll", "vcruntime140.dll", "vcruntime140_1.dll")
+foreach ($file in Get-ChildItem -LiteralPath $package -Recurse -File -Filter *.dll) {
+    if ($file.DirectoryName -ne (Join-Path $package "csc") -or $file.Name -notin $allowedCscDlls) {
+        throw "Unexpected portable runtime: $($file.FullName)"
+    }
+    $dependencies = (& $dumpbin /dependents $file.FullName) -join "`n"
+    if ($LASTEXITCODE -ne 0) { throw "Cannot inspect optional runtime: $($file.Name)" }
+    foreach ($match in [regex]::Matches($dependencies, "(?im)^\s+([a-z0-9_.-]+\.dll)\s*$")) {
+        $dll = $match.Groups[1].Value
+        if ($dll -in $allowedCscDlls) {
+            if (-not (Test-Path (Join-Path $file.DirectoryName $dll))) { throw "Missing app-local dependency: $dll" }
+        } elseif ($dll -notmatch "^api-ms-" -and -not (Test-Path (Join-Path $env:SystemRoot "System32\$dll"))) {
+            throw "Unbundled optional dependency: $dll"
+        }
+    }
+}
+if (Test-Path (Join-Path $package "php.ini")) {
     throw "Portable package contains stale runtime files"
 }
 
@@ -61,6 +78,9 @@ try {
     Expand-Archive -LiteralPath $archive -DestinationPath $extracted
     $yanflow = Join-Path $extracted "yanflow.exe"
     Invoke-Smoke $yanflow "--smoke" 0
+    Invoke-Smoke $yanflow "--text-smoke" 0
+    $cscWorker = Join-Path $extracted "csc\yanflow-csc-worker.exe"
+    if (Test-Path $cscWorker) { Invoke-Smoke $cscWorker "--smoke" 0 }
     Invoke-Smoke $yanflow "--asr-smoke" 20
     Copy-Item -LiteralPath $sample -Destination (Join-Path $extracted "yanflow-asr-smoke.wav")
     $worker = Join-Path $extracted "funasr\yanflow-asr-worker.exe"

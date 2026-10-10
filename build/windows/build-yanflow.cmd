@@ -22,6 +22,11 @@ start "" /wait "%PACKAGE_DIR%\yanflow.exe" --smoke
 set "SMOKE_EXIT=%ERRORLEVEL%"
 if not "%SMOKE_EXIT%"=="0" exit /b %SMOKE_EXIT%
 
+start "" /wait "%PACKAGE_DIR%\yanflow.exe" --text-smoke
+if errorlevel 1 exit /b 80
+start "" /wait "%PACKAGE_DIR%\yanflow.exe" --accuracy-smoke
+if errorlevel 1 exit /b 110
+
 if not defined YANFLOW_SKIP_ASR_SMOKE (
     copy /y "%DEPS_DIR%\source\sensevoice-v0.1.9\runtime\llama.cpp\tests\sample.wav" "%PACKAGE_DIR%\yanflow-asr-smoke.wav" >nul
     if errorlevel 1 exit /b %errorlevel%

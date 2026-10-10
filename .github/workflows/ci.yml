@@ -37,6 +37,10 @@ jobs:
           call build\windows\test-yanflow-worker.cmd -Iterations 0
           if errorlevel 1 exit /b %errorlevel%
 
+      - name: Verify dictionary guards and correction fallbacks
+        shell: cmd
+        run: build\windows\test-yanflow-correction.cmd
+
       - name: Verify native imports and extracted portable package
         shell: cmd
         run: build\windows\test-yanflow-native.cmd

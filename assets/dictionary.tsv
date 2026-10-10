@@ -1,0 +1,17 @@
+# YanFlow UTF-8 dictionary; columns are separated by TAB.
+# kind<TAB>source<TAB>canonical<TAB>required context (optional for term)
+# case: ASCII case only, whole word; term: exact alias; phonetic: Chinese alias
+# phonetic requires a context and at least two Chinese characters. No fuzzy guessing.
+case	yanflow	YanFlow
+case	openai	OpenAI
+case	chatgpt	ChatGPT
+case	sensevoice	SenseVoice
+case	macbert	MacBERT
+case	macbert4csc	MacBERT4CSC
+case	github	GitHub
+case	win32	Win32
+case	asr	ASR
+case	api	API
+# Add your confirmed aliases below, for example (remove # and use real TABs):
+# term	麦克伯特	MacBERT	中文纠错
+# phonetic	热此	热词	语音识别
