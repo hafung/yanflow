@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(yanflow VERSION 0.4.1 LANGUAGES CXX RC)
+project(yanflow VERSION 0.4.2 LANGUAGES CXX RC)
 
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "YanFlow requires Windows x64 and the MSVC toolchain")

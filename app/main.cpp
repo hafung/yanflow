@@ -51,6 +51,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         else if (std::wcscmp(option, L"--long-hold-smoke") == 0) smokeMilliseconds = -10;
         else if (std::wcscmp(option, L"--long-stream-smoke") == 0) smokeMilliseconds = -11;
         else if (std::wcscmp(option, L"--ui-preview-smoke") == 0) smokeMilliseconds = -12;
+        else if (std::wcscmp(option, L"--ui-state-smoke") == 0) smokeMilliseconds = -13;
     }
     LocalFree(arguments);
 

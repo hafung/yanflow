@@ -2,6 +2,31 @@
 #include <cstdint>
 
 namespace yanflow {
+// Modifier-only toggle: any ordering/hand, one activation until all released.
+class ListeningToggleHotkey {
+public:
+    bool key(uint32_t vk, bool down, bool injected = false) {
+        if (injected) return false;
+        uint32_t bit = 0;
+        switch (vk) {
+        case 0xa2: bit = 1; break; case 0xa3: bit = 2; break;
+        case 0x5b: bit = 4; break; case 0x5c: bit = 8; break;
+        case 0xa0: bit = 16; break; case 0xa1: bit = 32; break;
+        case 0xa4: bit = 64; break; case 0xa5: bit = 128; break;
+        default: if (down && keys_) blocked_ = true; break;
+        }
+        if (bit) { if (down) keys_ |= bit; else keys_ &= ~bit; }
+        if (!keys_) { latched_ = blocked_ = false; return false; }
+        if (down && !latched_ && !blocked_ && (keys_ & 3) && (keys_ & 12) && (keys_ & 48) && !(keys_ & 192)) {
+            latched_ = true; return true;
+        }
+        return false;
+    }
+    void reset() { keys_ = 0; latched_ = blocked_ = false; }
+private:
+    uint32_t keys_ = 0;
+    bool latched_ = false, blocked_ = false;
+};
 // A small state machine shared by the Win32 hook and the focused smoke.
 class HoldHotkey {
 public:

@@ -21,7 +21,7 @@
 
 ## 中文
 
-言流是 Windows 上的全局实时语音转录工具。默认按住 `Ctrl + Win` 录音，松开识别，结果会
+言流是 Windows 上的全局实时语音转录工具。默认按住 `Ctrl + Win` 录音，松开识别；`Ctrl + Win + Shift` 切换实时监听。结果会
 落进此刻正在编辑的地方；没有合适的输入框时，它就把文字留在一枚可复制、可写入 TXT
 的气泡里。
 
@@ -45,8 +45,8 @@ PyTorch，更不要求独立显卡。模型由常驻 worker 只加载一次，�
 
 1. 从 [Releases](https://github.com/hafung/yanflow/releases/latest) 下载 `windows-x64.zip`。
 2. 解压到任意可写目录，运行 `yanflow.exe`。
-3. 按住 `Ctrl + Win` 录音，松开任一键识别。免按住模式仍用 `Ctrl + Alt + Space` 开始、
-   `Ctrl + Alt + S` 停止；右键悬浮按钮可以改键或关闭按住模式。按住模式最长 60 秒。
+3. 按住 `Ctrl + Win` 录音，松开任一键识别（最长 60 秒）。`Ctrl + Win + Shift` 按一次
+   开启实时监听，再按一次关闭。右键悬浮按钮可以设置额外快捷键或关闭按住模式。
 
 ### 保守纠错
 
@@ -59,6 +59,7 @@ PyTorch，更不要求独立显卡。模型由常驻 worker 只加载一次，�
 右键“纠正并记住”可确认误词→正确词，默认只用于这次录音的目标应用，并复制本次正确文本。
 记住的是用户确认的替换规则，不训练模型，也不自动推断新的误词。
 “应用词库”可选择自动、通用或开发词库；应用专用词库叠加在所选词库上，升级不会覆盖个人规则。
+气泡按文字长短调整尺寸，长文本自动换行并有尺寸上限；复制后按钮变为“关闭”，点击可收起气泡。
 启用可选模型、词典格式及三阶段评测方法见 [纠错说明](docs/text-correction.md)。
 
 Windows 可能在首次使用麦克风时请求权限。普通权限进程不能向管理员权限窗口注入文本，
@@ -100,8 +101,8 @@ by incantation—it is simply kept inside deliberate boundaries.
 1. Download the `windows-x64.zip` from [Releases](https://github.com/hafung/yanflow/releases/latest).
 2. Extract it to any writable directory and run `yanflow.exe`.
 3. Hold `Ctrl + Win` to record; release either key to recognize (60 s maximum).
-   Hands-free mode still starts with `Ctrl + Alt + Space` and stops with `Ctrl + Alt + S`.
-   Right-click the orb to remap hands-free keys or disable hold mode.
+   Press `Ctrl + Win + Shift` to toggle hands-free listening on or off.
+   Right-click the orb to configure additional keys or disable hold mode.
 
 An editable dictionary normalizes explicit terms conservatively. Optional MacBERT4CSC is disabled
 by default, included in every standard package, and only accepts tightly gated Chinese character edits; dictionary terms, English,
@@ -141,6 +142,7 @@ build\windows\test-yanflow-idle.cmd
 build\windows\test-yanflow-pipeline.cmd
 build\windows\test-yanflow-textbox.cmd
 build\windows\test-yanflow-fallback.cmd
+build\windows\test-yanflow-ui.cmd
 build\windows\test-yanflow-edge.cmd
 build\windows\test-yanflow-vscode.cmd
 build\windows\test-yanflow-hold.cmd

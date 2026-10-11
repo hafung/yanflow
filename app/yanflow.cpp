@@ -41,9 +41,9 @@ constexpr UINT kMessageStatus = WM_APP + 2;
 constexpr UINT kMessageHold = WM_APP + 3;
 constexpr UINT kMessageStreamingDone = WM_APP + 4;
 constexpr UINT kMessageCsc = WM_APP + 5;
+constexpr UINT kMessageListeningToggle = WM_APP + 6;
 constexpr UINT_PTR kTimerSmoke = 1;
 constexpr UINT_PTR kTimerPipelineStop = 2;
-constexpr UINT_PTR kTimerCopyFeedback = 4;
 constexpr UINT_PTR kTimerIdle = 5;
 constexpr UINT_PTR kTimerHold = 6;
 constexpr UINT_PTR kTimerStreamingFeed = 7;
@@ -87,12 +87,13 @@ constexpr uint64_t kIdleTimeoutMilliseconds = 30000;
 constexpr uint64_t kMaximumHoldMilliseconds = 60000;
 constexpr int kCollapsedSize = 64;
 constexpr int kBubbleWidth = 480;
-constexpr int kBubbleHeight = 112;
+constexpr int kBubbleMinimumHeight = 88;
+constexpr int kBubbleMaximumHeight = 216;
 
-RECT bubbleActionRect(bool write, bool transcript = true)
+RECT bubbleActionRect(bool write, int width, int height, bool transcript = true)
 {
-    const int top = transcript ? (kBubbleHeight - 64) / 2 : (kBubbleHeight - 28) / 2;
-    return {kBubbleWidth - 68, top + (write ? 36 : 0), kBubbleWidth - 12, top + (write ? 36 : 0) + 28};
+    const int top = transcript ? (height - 64) / 2 : (height - 28) / 2;
+    return {width - 68, top + (write ? 36 : 0), width - 12, top + (write ? 36 : 0) + 28};
 }
 
 struct HotkeyBinding {
@@ -661,7 +662,7 @@ public:
             exitCode_ = 70;
         }
         loadSettings();
-        if (smokeMilliseconds_ == -12) cscEnabled_.store(false);
+        if (smokeMilliseconds_ == -12 || smokeMilliseconds_ == -13) cscEnabled_.store(false);
         if (smokeMilliseconds_ > 0 && !runComparisonSmoke()) exitCode_ = 158;
         workerRunning_.store(true, std::memory_order_release);
         endpointThread_ = std::thread(&YanFlowApp::endpointLoop, this);
@@ -680,7 +681,20 @@ public:
         if (smokeMilliseconds_ == -12) {
             fallbackText_ = L"没有可写的输入框时，识别文字会留在这里。\n可以复制，也可以写入桌面 TXT。";
             fallbackIsTranscript_ = true;
-            exitCode_ = saveUiPreview(L"yanflow-ui-collapsed.bmp", false) && saveUiPreview(L"yanflow-ui-bubble.bmp", true) ? 0 : 159;
+            bool saved = saveUiPreview(L"yanflow-ui-collapsed.bmp", false) && saveUiPreview(L"yanflow-ui-bubble.bmp", true);
+            fallbackText_ = L"好";
+            const auto shortBubbleSize = measureBubble();
+            saved = saved && saveUiPreview(L"yanflow-ui-short.bmp", true);
+            fallbackText_ = std::wstring(160, L'多');
+            const auto longBubbleSize = measureBubble();
+            saved = saved && saveUiPreview(L"yanflow-ui-long.bmp", true);
+            copiedFeedback_ = true;
+            saved = saved && saveUiPreview(L"yanflow-ui-copied.bmp", true);
+            exitCode_ = saved && shortBubbleSize.cx < longBubbleSize.cx && shortBubbleSize.cy < longBubbleSize.cy && longBubbleSize.cx <= kBubbleWidth &&
+                longBubbleSize.cy <= kBubbleMaximumHeight ? 0 : 159;
+            SetTimer(window_, kTimerSmoke, 200, nullptr);
+        } else if (smokeMilliseconds_ == -13) {
+            exitCode_ = runUiStateSmoke();
             SetTimer(window_, kTimerSmoke, 200, nullptr);
         } else if (smokeMilliseconds_ == -8) {
             const bool passed = runLearnSmoke();
@@ -760,9 +774,10 @@ private:
             const auto* key = reinterpret_cast<const KBDLLHOOKSTRUCT*>(parameter);
             const bool down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
             const bool up = message == WM_KEYUP || message == WM_SYSKEYUP;
-            if ((down || up) && hookOwner_->holdEnabled_ && (key->flags & LLKHF_INJECTED) == 0) {
-                const auto action = hookOwner_->holdKeys_.key(key->vkCode, down);
-                if (action == yanflow::HoldHotkey::Action::Press) {
+            if ((down || up) && (key->flags & LLKHF_INJECTED) == 0) {
+                const bool toggle = hookOwner_->toggleKeys_.key(key->vkCode, down);
+                const auto action = hookOwner_->holdEnabled_ ? hookOwner_->holdKeys_.key(key->vkCode, down) : yanflow::HoldHotkey::Action::None;
+                if (toggle || action == yanflow::HoldHotkey::Action::Press) {
                     // Pass both modifier downs/ups through so Windows and the
                     // foreground app never see a stuck modifier. An unassigned
                     // injected key masks Start-menu activation on Win release.
@@ -772,7 +787,8 @@ private:
                     mask[1].ki.dwFlags = KEYEVENTF_KEYUP;
                     SendInput(2, mask, sizeof(INPUT));
                 }
-                if (action != yanflow::HoldHotkey::Action::None) {
+                if (toggle) PostMessageW(hookOwner_->window_, kMessageListeningToggle, 0, 0);
+                else if (action != yanflow::HoldHotkey::Action::None) {
                     // The hook only tracks keys and posts; audio work runs on the UI/worker threads.
                     PostMessageW(hookOwner_->window_, kMessageHold,
                         action == yanflow::HoldHotkey::Action::Press ? 1 : 0, 0);
@@ -840,11 +856,11 @@ private:
         case WM_LBUTTONDOWN:
             if (bubbleExpanded_) {
                 const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-                const auto copy = bubbleActionRect(false, fallbackIsTranscript_);
-                const auto write = bubbleActionRect(true);
+                const auto copy = actionRect(false);
+                const auto write = actionRect(true);
                 if (PtInRect(&copy, point)) {
-                    copiedFeedback_ = copyFallback();
-                    if (copiedFeedback_) SetTimer(window_, kTimerCopyFeedback, 1200, nullptr);
+                    if (copiedFeedback_) dismissFallback();
+                    else copyFallback();
                     InvalidateRect(window_, nullptr, FALSE); return 0;
                 }
                 if (fallbackIsTranscript_ && PtInRect(&write, point)) {
@@ -883,10 +899,18 @@ private:
             showContextMenu();
             return 0;
         case WM_HOTKEY:
-            if (wParam == kHotkeyStart) startListening();
+            if (wParam == kHotkeyStart) { if (sameHotkey(startHotkey_, stopHotkey_)) toggleListening(); else startListening(); }
             if (wParam == kHotkeyStop) stopListening();
             if (wParam == kHotkeyVisibility) toggleVisibility();
             if (wParam == kHotkeyCopy) copyFallback();
+            return 0;
+        case kMessageListeningToggle:
+            if (settingsWindow_ || learnWindow_) return 0;
+            if (holdSession_.load() && listening_.load()) {
+                // Ctrl+Win may already have started a hold before Shift arrives.
+                // Convert this same capture to real-time; do not stop/restart it.
+                holdSession_.store(false);
+            } else toggleListening();
             return 0;
         case kMessageHold:
             if (wParam != 0) {
@@ -956,7 +980,7 @@ private:
             if (lParam != 0) {
                 std::wstring* messageText = reinterpret_cast<std::wstring*>(lParam);
                 fallbackText_ = *messageText;
-                fallbackIsTranscript_ = false;
+                fallbackIsTranscript_ = false; copiedFeedback_ = false;
                 delete messageText;
                 expandBubble();
             }
@@ -995,12 +1019,6 @@ private:
                     }
                     if (idleGraceDeadline_ == 0 || now >= idleGraceDeadline_) stopListening();
                 }
-                return 0;
-            }
-            if (wParam == kTimerCopyFeedback) {
-                KillTimer(window_, kTimerCopyFeedback);
-                copiedFeedback_ = false;
-                InvalidateRect(window_, nullptr, FALSE);
                 return 0;
             }
             if (wParam == kTimerPipelineStop && (smokeMilliseconds_ == -4 || smokeMilliseconds_ == -7 || smokeMilliseconds_ == -9 || smokeMilliseconds_ == -10 || smokeMilliseconds_ == -11)) {
@@ -1063,7 +1081,7 @@ private:
         wchar_t name[256]{};
         if (!GetClassNameW(control, name, static_cast<int>(std::size(name)))) return -1;
         if (std::wcscmp(name, L"Edit") != 0 && std::wcscmp(name, L"EDIT") != 0 &&
-            std::wcsncmp(name, L"WindowsForms10.EDIT.", 20) != 0) return -1;
+            std::wcsncmp(name, L"WindowsForms10.EDIT.", 20) != 0 && _wcsnicmp(name, L"RichEdit", 8) != 0) return -1;
         return IsWindowEnabled(control) && !(GetWindowLongPtrW(control, GWL_STYLE) & ES_READONLY) ? 1 : 0;
     }
 
@@ -1100,7 +1118,7 @@ private:
 
     void rememberTarget()
     {
-        if (smokeMilliseconds_ != -2 && smokeMilliseconds_ != -4 && smokeMilliseconds_ != -7 && smokeMilliseconds_ != -9 && smokeMilliseconds_ != -10 && smokeMilliseconds_ != -11) {
+        if (smokeMilliseconds_ != -2 && smokeMilliseconds_ != -4 && smokeMilliseconds_ != -7 && smokeMilliseconds_ != -9 && smokeMilliseconds_ != -10 && smokeMilliseconds_ != -11 && smokeMilliseconds_ != -13) {
             HWND foreground = GetForegroundWindow();
             if (foreground != nullptr && foreground != window_) {
                 targetWindow_ = foreground;
@@ -1121,6 +1139,7 @@ private:
     void startListening(bool hold = false)
     {
         if (learnWindow_ || listening_.load(std::memory_order_acquire) || captureDrainPending_.load(std::memory_order_acquire)) return;
+        copiedFeedback_ = false;
         rememberTarget();
         {
             std::lock_guard<std::mutex> lock(queueMutex_);
@@ -1281,7 +1300,13 @@ private:
 
     static bool copyText(HWND owner, const std::wstring& text)
     {
-        if (text.empty() || !OpenClipboard(owner)) return false;
+        if (text.empty()) return false;
+        bool opened = false;
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            if (OpenClipboard(owner)) { opened = true; break; }
+            if (attempt < 7) Sleep(10);
+        }
+        if (!opened) return false;
         const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
         HGLOBAL data = GlobalAlloc(GMEM_MOVEABLE, bytes);
         bool copied = false;
@@ -1358,7 +1383,7 @@ private:
             fallbackText_ = corrected; fallbackIsTranscript_ = true;
         }
         copiedFeedback_ = copyText(window_, corrected);
-        if (copiedFeedback_) SetTimer(window_, kTimerCopyFeedback, 1800, nullptr);
+
         expandBubble(); InvalidateRect(window_, nullptr, FALSE);
         DestroyWindow(learnWindow_);
         if (!copiedFeedback_) MessageBoxW(window_, L"规则已保存；剪贴板暂时不可用，可从气泡重新复制正确文本。",
@@ -1438,6 +1463,22 @@ private:
 
     bool runLearnSmoke()
     {
+        const auto settings = settingsPath();
+        WritePrivateProfileStringW(L"Hotkeys", L"SchemaVersion", L"1", settings.c_str());
+        WritePrivateProfileStringW(L"Hotkeys", L"StartModifiers", L"3", settings.c_str());
+        WritePrivateProfileStringW(L"Hotkeys", L"StartKey", L"32", settings.c_str());
+        WritePrivateProfileStringW(L"Hotkeys", L"StopModifiers", L"3", settings.c_str());
+        WritePrivateProfileStringW(L"Hotkeys", L"StopKey", L"83", settings.c_str());
+        loadSettings();
+        if (startHotkey_.virtualKey || stopHotkey_.virtualKey || !holdEnabled_) return false;
+        WritePrivateProfileStringW(L"Hotkeys", L"SchemaVersion", L"1", settings.c_str());
+        WritePrivateProfileStringW(L"Hotkeys", L"StartModifiers", L"3", settings.c_str());
+        WritePrivateProfileStringW(L"Hotkeys", L"StartKey", L"117", settings.c_str());
+        WritePrivateProfileStringW(L"Hotkeys", L"StopModifiers", L"6", settings.c_str());
+        WritePrivateProfileStringW(L"Hotkeys", L"StopKey", L"118", settings.c_str());
+        loadSettings();
+        if (startHotkey_.virtualKey != VK_F6 || stopHotkey_.virtualKey != VK_F7 ||
+            startHotkey_.modifiers != (MOD_CONTROL | MOD_ALT) || stopHotkey_.modifiers != (MOD_CONTROL | MOD_SHIFT)) return false;
         lastRecognition_ = {L"语音识别支持热此", L"语音识别支持热此", L"yanflow-learning-smoke.exe"};
         recentRecognitions_.push_back(lastRecognition_);
         showLearnWindow();
@@ -1467,33 +1508,25 @@ private:
         const std::wstring path = settingsPath();
         holdEnabled_ = GetPrivateProfileIntW(L"Hotkeys", L"HoldEnabled", 1, path.c_str()) != 0;
         cscEnabled_.store(GetPrivateProfileIntW(L"Correction", L"MacBERTEnabled", 0, path.c_str()) != 0);
-        startHotkey_.modifiers = static_cast<UINT>(GetPrivateProfileIntW(
-            L"Hotkeys", L"StartModifiers", MOD_CONTROL | MOD_ALT, path.c_str()));
-        startHotkey_.virtualKey = static_cast<UINT>(GetPrivateProfileIntW(
-            L"Hotkeys", L"StartKey", VK_SPACE, path.c_str()));
-        stopHotkey_.modifiers = static_cast<UINT>(GetPrivateProfileIntW(
-            L"Hotkeys", L"StopModifiers", MOD_CONTROL | MOD_ALT, path.c_str()));
-        stopHotkey_.virtualKey = static_cast<UINT>(GetPrivateProfileIntW(
-            L"Hotkeys", L"StopKey", 'S', path.c_str()));
+        startHotkey_.modifiers = GetPrivateProfileIntW(L"Hotkeys", L"StartModifiers", 0, path.c_str());
+        startHotkey_.virtualKey = GetPrivateProfileIntW(L"Hotkeys", L"StartKey", 0, path.c_str());
+        stopHotkey_.modifiers = GetPrivateProfileIntW(L"Hotkeys", L"StopModifiers", 0, path.c_str());
+        stopHotkey_.virtualKey = GetPrivateProfileIntW(L"Hotkeys", L"StopKey", 0, path.c_str());
         startHotkey_.modifiers &= MOD_CONTROL | MOD_ALT | MOD_SHIFT;
         stopHotkey_.modifiers &= MOD_CONTROL | MOD_ALT | MOD_SHIFT;
-        if (startHotkey_.virtualKey == 0) startHotkey_ = {MOD_CONTROL | MOD_ALT, VK_SPACE};
-        if (stopHotkey_.virtualKey == 0) stopHotkey_ = {MOD_CONTROL | MOD_ALT, 'S'};
-        const HotkeyBinding visibility = {MOD_CONTROL | MOD_ALT, 'H'};
-        const HotkeyBinding copy = {MOD_CONTROL | MOD_ALT, 'C'};
-        if (sameHotkey(startHotkey_, stopHotkey_) || sameHotkey(startHotkey_, visibility) ||
-            sameHotkey(startHotkey_, copy)) {
-            startHotkey_ = {MOD_CONTROL | MOD_ALT, VK_SPACE};
-        }
-        if (sameHotkey(stopHotkey_, startHotkey_) || sameHotkey(stopHotkey_, visibility) ||
-            sameHotkey(stopHotkey_, copy)) {
-            stopHotkey_ = {MOD_CONTROL | MOD_ALT, 'S'};
+        if (GetPrivateProfileIntW(L"Hotkeys", L"SchemaVersion", 0, path.c_str()) < 2) {
+            if (sameHotkey(startHotkey_, HotkeyBinding{MOD_CONTROL | MOD_ALT, VK_SPACE}) &&
+                sameHotkey(stopHotkey_, HotkeyBinding{MOD_CONTROL | MOD_ALT, 'S'})) {
+                startHotkey_ = {}; stopHotkey_ = {};
+            }
+            persistSettings();
         }
     }
 
     void persistSettings()
     {
         const std::wstring path = settingsPath();
+        WritePrivateProfileStringW(L"Hotkeys", L"SchemaVersion", L"2", path.c_str());
         WritePrivateProfileStringW(L"Hotkeys", L"HoldEnabled", holdEnabled_ ? L"1" : L"0", path.c_str());
         WritePrivateProfileStringW(L"Correction", L"MacBERTEnabled", cscEnabled_.load() ? L"1" : L"0", path.c_str());
         const std::wstring startModifiers = std::to_wstring(startHotkey_.modifiers);
@@ -1508,31 +1541,18 @@ private:
 
     bool registerConfiguredHotkeys(const HotkeyBinding& start, const HotkeyBinding& stop, bool replaceExisting)
     {
-        const HotkeyBinding oldStart = startHotkey_;
-        const HotkeyBinding oldStop = stopHotkey_;
-        if (replaceExisting) {
-            UnregisterHotKey(window_, kHotkeyStart);
-            UnregisterHotKey(window_, kHotkeyStop);
-        }
-        const bool startRegistered = RegisterHotKey(window_, kHotkeyStart,
-            start.modifiers | MOD_NOREPEAT, start.virtualKey) != FALSE;
-        const bool stopRegistered = startRegistered && RegisterHotKey(window_, kHotkeyStop,
-            stop.modifiers | MOD_NOREPEAT, stop.virtualKey) != FALSE;
-        if (startRegistered && stopRegistered) {
-            startHotkeyRegistered_ = true;
-            stopHotkeyRegistered_ = true;
-            return true;
-        }
-        if (startRegistered) UnregisterHotKey(window_, kHotkeyStart);
-        if (replaceExisting) {
-            startHotkeyRegistered_ = RegisterHotKey(window_, kHotkeyStart,
-                oldStart.modifiers | MOD_NOREPEAT, oldStart.virtualKey) != FALSE;
-            stopHotkeyRegistered_ = RegisterHotKey(window_, kHotkeyStop,
-                oldStop.modifiers | MOD_NOREPEAT, oldStop.virtualKey) != FALSE;
-        } else {
-            startHotkeyRegistered_ = false;
-            stopHotkeyRegistered_ = false;
-        }
+        const auto registerKeys = [this](const HotkeyBinding& first, const HotkeyBinding& second) {
+            const bool shared = first.virtualKey && sameHotkey(first, second);
+            const bool firstOk = !first.virtualKey || RegisterHotKey(window_, kHotkeyStart, first.modifiers | MOD_NOREPEAT, first.virtualKey);
+            const bool secondOk = !second.virtualKey || shared || (firstOk && RegisterHotKey(window_, kHotkeyStop, second.modifiers | MOD_NOREPEAT, second.virtualKey));
+            startHotkeyRegistered_ = firstOk && first.virtualKey;
+            stopHotkeyRegistered_ = secondOk && second.virtualKey;
+            return firstOk && secondOk;
+        };
+        if (replaceExisting) { UnregisterHotKey(window_, kHotkeyStart); UnregisterHotKey(window_, kHotkeyStop); }
+        if (registerKeys(start, stop)) return true;
+        UnregisterHotKey(window_, kHotkeyStart); UnregisterHotKey(window_, kHotkeyStop);
+        if (replaceExisting) registerKeys(startHotkey_, stopHotkey_);
         return false;
     }
 
@@ -1563,12 +1583,8 @@ private:
         const HotkeyBinding stop = bindingFromControl(GetDlgItem(settingsWindow_, kSettingsStop));
         const HotkeyBinding visibility = {MOD_CONTROL | MOD_ALT, 'H'};
         const HotkeyBinding copy = {MOD_CONTROL | MOD_ALT, 'C'};
-        if (start.virtualKey == 0 || stop.virtualKey == 0) {
-            MessageBoxW(settingsWindow_, L"开始和停止监听都必须设置快捷键。", L"言流快捷键", MB_OK | MB_ICONWARNING);
-            return false;
-        }
-        if (sameHotkey(start, stop) || sameHotkey(start, visibility) || sameHotkey(start, copy) ||
-            sameHotkey(stop, visibility) || sameHotkey(stop, copy)) {
+        if ((start.virtualKey && (sameHotkey(start, visibility) || sameHotkey(start, copy))) ||
+            (stop.virtualKey && (sameHotkey(stop, visibility) || sameHotkey(stop, copy)))) {
             MessageBoxW(settingsWindow_, L"快捷键互相冲突，请为开始和停止监听选择不同组合。",
                 L"言流快捷键", MB_OK | MB_ICONWARNING);
             return false;
@@ -1582,7 +1598,7 @@ private:
         stopHotkey_ = stop;
         holdEnabled_ = SendMessageW(GetDlgItem(settingsWindow_, kSettingsHold), BM_GETCHECK, 0, 0) == BST_CHECKED;
         if (!holdEnabled_ && holdSession_.load()) stopListening();
-        holdKeys_.reset();
+        holdKeys_.reset(); toggleKeys_.reset();
         persistSettings();
         DestroyWindow(settingsWindow_);
         return true;
@@ -1633,31 +1649,33 @@ private:
         RegisterClassExW(&settingsClass);
         settingsWindow_ = CreateWindowExW(WS_EX_DLGMODALFRAME, settingsClass.lpszClassName,
             L"言流快捷键设置", WS_CAPTION | WS_SYSMENU,
-            CW_USEDEFAULT, CW_USEDEFAULT, 420, 270, window_, nullptr, instance_, this);
+            CW_USEDEFAULT, CW_USEDEFAULT, 420, 300, window_, nullptr, instance_, this);
         if (settingsWindow_ == nullptr) return;
-        CreateWindowExW(0, L"STATIC", L"免按住开始", WS_CHILD | WS_VISIBLE,
-            28, 28, 90, 24, settingsWindow_, nullptr, instance_, nullptr);
+        CreateWindowExW(0, L"STATIC", L"Ctrl+Win+Shift：切换实时监听", WS_CHILD | WS_VISIBLE,
+            28, 12, 360, 24, settingsWindow_, nullptr, instance_, nullptr);
+        CreateWindowExW(0, L"STATIC", L"额外开始", WS_CHILD | WS_VISIBLE,
+            28, 56, 90, 24, settingsWindow_, nullptr, instance_, nullptr);
         HWND startControl = CreateWindowExW(WS_EX_CLIENTEDGE, HOTKEY_CLASSW, L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP, 125, 24, 220, 28, settingsWindow_,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP, 125, 52, 220, 28, settingsWindow_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsStart)), instance_, nullptr);
-        CreateWindowExW(0, L"STATIC", L"免按住停止", WS_CHILD | WS_VISIBLE,
-            28, 72, 90, 24, settingsWindow_, nullptr, instance_, nullptr);
+        CreateWindowExW(0, L"STATIC", L"额外停止", WS_CHILD | WS_VISIBLE,
+            28, 100, 90, 24, settingsWindow_, nullptr, instance_, nullptr);
         HWND stopControl = CreateWindowExW(WS_EX_CLIENTEDGE, HOTKEY_CLASSW, L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP, 125, 68, 220, 28, settingsWindow_,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP, 125, 96, 220, 28, settingsWindow_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsStop)), instance_, nullptr);
         HWND holdControl = CreateWindowExW(0, L"BUTTON",
             keyboardHook_ ? L"Ctrl+Win：按住录音，松开识别" : L"Ctrl+Win：键盘监听不可用，请重启",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-            28, 111, 360, 24, settingsWindow_,
+            28, 139, 360, 24, settingsWindow_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsHold)), instance_, nullptr);
         SendMessageW(holdControl, BM_SETCHECK, holdEnabled_ ? BST_CHECKED : BST_UNCHECKED, 0);
-        CreateWindowExW(0, L"STATIC", L"按住模式最长 60 秒；免按住模式静音自动分段",
-            WS_CHILD | WS_VISIBLE, 28, 145, 360, 24, settingsWindow_, nullptr, instance_, nullptr);
+        CreateWindowExW(0, L"STATIC", L"额外快捷键可留空；按住模式最长 60 秒",
+            WS_CHILD | WS_VISIBLE, 28, 173, 360, 24, settingsWindow_, nullptr, instance_, nullptr);
         CreateWindowExW(0, L"BUTTON", L"保存", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            175, 187, 80, 30, settingsWindow_,
+            175, 215, 80, 30, settingsWindow_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsSave)), instance_, nullptr);
         CreateWindowExW(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            265, 187, 80, 30, settingsWindow_,
+            265, 215, 80, 30, settingsWindow_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsCancel)), instance_, nullptr);
         SendMessageW(startControl, HKM_SETHOTKEY, bindingForControl(startHotkey_), 0);
         SendMessageW(stopControl, HKM_SETHOTKEY, bindingForControl(stopHotkey_), 0);
@@ -1677,9 +1695,8 @@ private:
         menuApplication_ = applicationForWindow(GetForegroundWindow());
         if (menuApplication_.empty()) menuApplication_ = lastRecognition_.application;
         HMENU menu = CreatePopupMenu();
-        const std::wstring listeningLabel = (listening_.load() ? L"停止聆听\t" : L"开始聆听\t") +
-            hotkeyLabel(listening_.load() ? stopHotkey_ : startHotkey_) +
-            ((listening_.load() ? stopHotkeyRegistered_ : startHotkeyRegistered_) ? L"" : L"（冲突，请设置）");
+        const std::wstring listeningLabel = (listening_.load() ? L"关闭实时监听\t" : L"开启实时监听\t") +
+            std::wstring(keyboardHook_ ? L"Ctrl+Win+Shift" : L"键盘监听不可用");
         AppendMenuW(menu, MF_STRING, kCommandToggle, listeningLabel.c_str());
         AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, holdEnabled_
             ? (keyboardHook_ ? L"按住录音\tCtrl+Win" : L"按住录音：键盘监听不可用") : L"按住录音：已关闭");
@@ -1762,7 +1779,7 @@ private:
             DrawTextW(memory, fallbackText_.c_str(), -1, &measured, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
             textRect.top += std::max(0L, (textRect.bottom - textRect.top - (measured.bottom - measured.top)) / 2);
             DrawTextW(memory, fallbackText_.c_str(), -1, &textRect,
-                DT_LEFT | DT_VCENTER | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX);
+                DT_LEFT | DT_VCENTER | DT_WORDBREAK | DT_EDITCONTROL | DT_END_ELLIPSIS | DT_NOPREFIX);
             SelectObject(memory, oldFont);
             DeleteObject(font);
 
@@ -1771,14 +1788,14 @@ private:
                 DEFAULT_PITCH, L"Microsoft YaHei UI");
             oldFont = SelectObject(memory, actionFont);
             const auto action = [&](bool write) {
-                auto button = bubbleActionRect(write, fallbackIsTranscript_);
+                auto button = bubbleActionRect(write, rect.right, rect.bottom, fallbackIsTranscript_);
                 HBRUSH brush = CreateSolidBrush(RGB(36, 42, 57));
                 auto oldBrush = SelectObject(memory, brush);
                 auto oldPen = SelectObject(memory, GetStockObject(NULL_PEN));
                 RoundRect(memory, button.left, button.top, button.right, button.bottom, 10, 10);
                 SelectObject(memory, oldPen); SelectObject(memory, oldBrush); DeleteObject(brush);
                 SetTextColor(memory, write ? RGB(255, 199, 122) : copiedFeedback_ ? RGB(112, 224, 173) : RGB(164, 211, 255));
-                DrawTextW(memory, write ? L"写入" : copiedFeedback_ ? L"已复制" : L"复制", -1, &button,
+                DrawTextW(memory, write ? L"写入" : copiedFeedback_ ? L"关闭" : L"复制", -1, &button,
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             };
             action(false);
@@ -1804,8 +1821,9 @@ private:
 
     bool saveUiPreview(const wchar_t* name, bool expanded)
     {
-        const int width = expanded ? kBubbleWidth : kCollapsedSize;
-        const int height = expanded ? kBubbleHeight : kCollapsedSize;
+        const SIZE size = expanded ? measureBubble() : SIZE{kCollapsedSize, kCollapsedSize};
+        const int width = size.cx;
+        const int height = size.cy;
         BITMAPINFO info{};
         info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         info.bmiHeader.biWidth = width; info.bmiHeader.biHeight = -height;
@@ -1950,7 +1968,7 @@ private:
     void inferenceLoop()
     {
         unsigned int cscRevision = ~0u;
-        if (smokeMilliseconds_ <= 0 && smokeMilliseconds_ != -3 && smokeMilliseconds_ != -8 && smokeMilliseconds_ != -12) {
+        if (smokeMilliseconds_ <= 0 && smokeMilliseconds_ != -3 && smokeMilliseconds_ != -8 && smokeMilliseconds_ != -12 && smokeMilliseconds_ != -13) {
             std::wstring error;
             if (!asrWorker_.warmup(executableDirectory(), error)) {
                 PostMessageW(window_, kMessageStatus, static_cast<WPARAM>(ListeningState::Error),
@@ -2070,7 +2088,7 @@ private:
             lastSpeechTick_.store(GetTickCount64(), std::memory_order_release);
             idleGraceDeadline_ = 0;
         }
-        if (smokeMilliseconds_ != -2 && smokeMilliseconds_ != -4 && smokeMilliseconds_ != -7 && smokeMilliseconds_ != -9 && smokeMilliseconds_ != -10 && smokeMilliseconds_ != -11) {
+        if (smokeMilliseconds_ != -2 && smokeMilliseconds_ != -4 && smokeMilliseconds_ != -7 && smokeMilliseconds_ != -9 && smokeMilliseconds_ != -10 && smokeMilliseconds_ != -11 && smokeMilliseconds_ != -13) {
             HWND foreground = GetForegroundWindow();
             if (foreground != nullptr && foreground != window_ &&
                 (lastRecognition_.application.empty() || applicationForWindow(foreground) == lastRecognition_.application)) {
@@ -2084,6 +2102,7 @@ private:
             lastRecognition_.delivery = yanflow::deliverText(targetWindow_, window_, text);
         const bool injected = lastRecognition_.delivery.submitted;
         retainRecognition(lastRecognition_);
+        copiedFeedback_ = false;
         if (injected) {
             fallbackText_.clear();
             fallbackIsTranscript_ = false;
@@ -2117,7 +2136,7 @@ private:
             exitCode_ = injected ? 0 : 61;
             DestroyWindow(window_);
         } else if (smokeMilliseconds_ == -2) {
-            const auto copyRect = bubbleActionRect(false);
+            const auto copyRect = actionRect(false);
             const LPARAM copyPoint = MAKELPARAM((copyRect.left + copyRect.right) / 2, (copyRect.top + copyRect.bottom) / 2);
             SendMessageW(window_, WM_LBUTTONDOWN, MK_LBUTTON, copyPoint);
             SendMessageW(window_, WM_LBUTTONUP, 0, copyPoint);
@@ -2140,9 +2159,12 @@ private:
             GetMonitorInfoW(monitor, &monitorInfo);
             const bool fullyVisible = rect.left >= monitorInfo.rcWork.left && rect.top >= monitorInfo.rcWork.top &&
                 rect.right <= monitorInfo.rcWork.right && rect.bottom <= monitorInfo.rcWork.bottom;
-            exitCode_ = !injected && rect.right - rect.left == kBubbleWidth &&
-                rect.bottom - rect.top == kBubbleHeight && fullyVisible && clipboardMatches &&
-                copiedFeedback_ && !listening_.load(std::memory_order_acquire) ? 0 : 30;
+            const bool valid = !injected && rect.right - rect.left <= kBubbleWidth && rect.right - rect.left >= 200 &&
+                rect.bottom - rect.top >= kBubbleMinimumHeight && rect.bottom - rect.top <= kBubbleMaximumHeight &&
+                fullyVisible && clipboardMatches && copiedFeedback_ && !listening_.load();
+            SendMessageW(window_, WM_LBUTTONDOWN, MK_LBUTTON, copyPoint);
+            SendMessageW(window_, WM_LBUTTONUP, 0, copyPoint);
+            exitCode_ = valid && !bubbleExpanded_ && fallbackText_.empty() && !copiedFeedback_ ? 0 : 30;
             DestroyWindow(window_);
         } else if (smokeMilliseconds_ == -11) {
             smokeTranscript_ += text;
@@ -2177,6 +2199,46 @@ private:
         const bool saved = yanflow::writeUtf8File(joinPath(executableDirectory(), L"yanflow-long-result.txt"), smokeTranscript_);
         exitCode_ = saved && !streamingSmokeError_ ? 0 : 134;
         DestroyWindow(window_);
+    }
+
+    int runUiStateSmoke()
+    {
+        targetWindow_ = nullptr; targetWasEditable_ = false;
+        // This exercises delivery-state handling only, never a foreground app.
+        const auto result = [this](bool submitted, const wchar_t* status) {
+            auto* item = new RecognitionResult;
+            item->raw = item->final = L"已写入的文字";
+            item->application = L"yanflow-ui-state-smoke.exe";
+            item->serial = recentRecognitions_.size() + 1;
+            item->delivery = {submitted, status, L"test", submitted ? item->final : L""};
+            acceptResult(item);
+        };
+        result(true, L"verified");
+        if (bubbleExpanded_ || !fallbackText_.empty()) return 170;
+        result(true, L"submitted_unverified");
+        if (bubbleExpanded_ || !fallbackText_.empty()) return 171;
+        result(true, L"mismatch");
+        if (bubbleExpanded_ || !fallbackText_.empty()) return 172;
+        result(false, L"bubble");
+        if (!bubbleExpanded_ || fallbackText_.empty() || copiedFeedback_) return 173;
+        auto rect = actionRect(false);
+        const auto point = MAKELPARAM((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+        SendMessageW(window_, WM_LBUTTONDOWN, MK_LBUTTON, point);
+        if (!copiedFeedback_ || !bubbleExpanded_) return 174;
+        result(false, L"bubble");
+        if (copiedFeedback_) return 175; // New text must not be dismissed as already copied.
+        rect = actionRect(false);
+        const auto next = MAKELPARAM((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+        SendMessageW(window_, WM_LBUTTONDOWN, MK_LBUTTON, next);
+        SendMessageW(window_, WM_LBUTTONDOWN, MK_LBUTTON, next);
+        if (bubbleExpanded_ || !fallbackText_.empty()) return 176;
+        // Model the two-key hold that arrives before the third toggle modifier.
+        listening_.store(true); holdSession_.store(true);
+        SendMessageW(window_, kMessageListeningToggle, 0, 0);
+        if (!listening_.load() || holdSession_.load()) return 177;
+        SendMessageW(window_, kMessageListeningToggle, 0, 0);
+        captureDrainPending_.store(false);
+        return !listening_.load() && !holdSession_.load() ? 0 : 178;
     }
 
     void retainRecognition(const RecognitionResult& result)
@@ -2245,22 +2307,8 @@ private:
 
     bool copyFallback()
     {
-        if (fallbackText_.empty() || !OpenClipboard(window_)) return false;
-        EmptyClipboard();
-        const size_t bytes = (fallbackText_.size() + 1) * sizeof(wchar_t);
-        HGLOBAL data = GlobalAlloc(GMEM_MOVEABLE, bytes);
-        bool copied = false;
-        if (data != nullptr) {
-            void* memory = GlobalLock(data);
-            memcpy(memory, fallbackText_.c_str(), bytes);
-            GlobalUnlock(data);
-            if (SetClipboardData(CF_UNICODETEXT, data) == nullptr) {
-                GlobalFree(data);
-            } else {
-                copied = true;
-            }
-        }
-        CloseClipboard();
+        const bool copied = copyText(window_, fallbackText_);
+        if (copied) { copiedFeedback_ = true; InvalidateRect(window_, nullptr, FALSE); }
         return copied;
     }
 
@@ -2364,7 +2412,7 @@ private:
         fallbackText_ = L"滨海新区有房，继续测试写入。";
         fallbackIsTranscript_ = true;
         expandBubble();
-        const auto writeRect = bubbleActionRect(true);
+        const auto writeRect = actionRect(true);
         const LPARAM writePoint = MAKELPARAM((writeRect.left + writeRect.right) / 2, (writeRect.top + writeRect.bottom) / 2);
         SendMessageW(window_, WM_LBUTTONDOWN, MK_LBUTTON, writePoint);
         SendMessageW(window_, WM_LBUTTONUP, 0, writePoint);
@@ -2392,9 +2440,48 @@ private:
             !fallbackIsTranscript_ && !bubbleExpanded_;
     }
 
+    RECT actionRect(bool write) const
+    {
+        RECT client{}; GetClientRect(window_, &client);
+        return bubbleActionRect(write, client.right, client.bottom, fallbackIsTranscript_);
+    }
+
+    SIZE measureBubble() const
+    {
+        MONITORINFO monitor{sizeof(monitor)};
+        GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor);
+        const LONG maximumWidth = std::min<LONG>(kBubbleWidth, monitor.rcWork.right - monitor.rcWork.left);
+        const LONG maximumHeight = std::min<LONG>(kBubbleMaximumHeight, monitor.rcWork.bottom - monitor.rcWork.top);
+        HDC dc = GetDC(window_);
+        HFONT font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+        auto previous = SelectObject(dc, font);
+        LONG naturalWidth = 0;
+        for (size_t begin = 0; begin < fallbackText_.size();) {
+            const size_t end = fallbackText_.find(L'\n', begin);
+            const size_t stop = end == std::wstring::npos ? fallbackText_.size() : end;
+            SIZE line{}; GetTextExtentPoint32W(dc, fallbackText_.data() + begin, static_cast<int>(stop - begin), &line);
+            naturalWidth = std::max(naturalWidth, line.cx);
+            begin = stop + 1;
+        }
+        const LONG width = std::min(maximumWidth, std::max(200L, naturalWidth + 152));
+        RECT text{0, 0, std::max(16L, width - 152), 0};
+        DrawTextW(dc, fallbackText_.c_str(), -1, &text, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+        const LONG height = std::min(maximumHeight, std::max<LONG>(kBubbleMinimumHeight, text.bottom + 24));
+        SelectObject(dc, previous); DeleteObject(font); ReleaseDC(window_, dc);
+        return SIZE{width, height};
+    }
+
+    void dismissFallback()
+    {
+        fallbackText_.clear(); fallbackIsTranscript_ = false; copiedFeedback_ = false;
+        collapseBubble(); InvalidateRect(window_, nullptr, FALSE);
+    }
+
     void expandBubble()
     {
-        resizeBubble(kBubbleWidth, kBubbleHeight, true);
+        const auto size = measureBubble();
+        resizeBubble(size.cx, size.cy, true);
     }
 
     void collapseBubble()
@@ -2413,7 +2500,7 @@ private:
         MONITORINFO monitorInfo = {sizeof(MONITORINFO)};
         GetMonitorInfoW(monitor, &monitorInfo);
         int right = rect.right;
-        int top = rect.top;
+        int top = rect.bottom - height;
         int left = right - width;
         if (left < monitorInfo.rcWork.left) {
             left = monitorInfo.rcWork.left;
@@ -2445,6 +2532,7 @@ private:
     inline static YanFlowApp* hookOwner_ = nullptr;
     HHOOK keyboardHook_ = nullptr;
     yanflow::HoldHotkey holdKeys_;
+    yanflow::ListeningToggleHotkey toggleKeys_;
     bool holdEnabled_ = true;
     uint64_t holdStartedTick_ = 0;
     HWND window_ = nullptr;
@@ -2503,8 +2591,8 @@ private:
     bool fallbackIsTranscript_ = false;
     bool bubbleExpanded_ = false;
     bool copiedFeedback_ = false;
-    HotkeyBinding startHotkey_ = {MOD_CONTROL | MOD_ALT, VK_SPACE};
-    HotkeyBinding stopHotkey_ = {MOD_CONTROL | MOD_ALT, 'S'};
+    HotkeyBinding startHotkey_{};
+    HotkeyBinding stopHotkey_{};
     bool startHotkeyRegistered_ = false;
     bool stopHotkeyRegistered_ = false;
     int smokeMilliseconds_ = 0;

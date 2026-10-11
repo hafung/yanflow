@@ -15,6 +15,20 @@ bool nativeEditor(HWND editor) {
     return _wcsicmp(name, L"Edit") == 0 || _wcsnicmp(name, L"RichEdit", 8) == 0 ||
         std::wcsncmp(name, L"WindowsForms10.EDIT.", 20) == 0;
 }
+bool richEditor(HWND editor) {
+    wchar_t name[256]{};
+    return GetClassNameW(editor, name, static_cast<int>(std::size(name))) && _wcsnicmp(name, L"RichEdit", 8) == 0;
+}
+std::wstring normalizedLines(const std::wstring& text) {
+    std::wstring result;
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == L'\r') {
+            if (i + 1 < text.size() && text[i + 1] == L'\n') ++i;
+            result += L'\n';
+        } else result += text[i];
+    }
+    return result;
+}
 bool message(HWND editor, UINT type, WPARAM first, LPARAM second, DWORD_PTR& value) {
     return SendMessageTimeoutW(editor, type, first, second, SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &value) != 0;
 }
@@ -34,9 +48,15 @@ TextDelivery deliverNative(HWND editor, const std::wstring& text, HWND foregroun
     std::wstring before;
     DWORD_PTR selection = 0, ignored = 0;
     if (!readText(editor, before) || !message(editor, EM_GETSEL, 0, 0, selection)) return delivery;
+    // RichEdit selection offsets count a paragraph as one UTF-16 unit, while
+    // WM_GETTEXT expands it to CRLF. Standard Edit offsets already count CRLF.
+    if (richEditor(editor)) before = normalizedLines(before);
     const size_t start = LOWORD(selection), end = HIWORD(selection);
     if (start > end || end > before.size() || before.size() + text.size() > 65534) return delivery;
     auto expected = before; expected.replace(start, end - start, text);
+    expected = normalizedLines(expected);
+    DWORD_PTR limit = 0;
+    if (message(editor, EM_GETLIMITTEXT, 0, 0, limit) && limit && expected.size() > limit) return delivery;
     if (foreground) {
         GUITHREADINFO info{sizeof(info)};
         if (GetForegroundWindow() != foreground || !GetGUIThreadInfo(GetWindowThreadProcessId(foreground, nullptr), &info) ||
@@ -46,14 +66,18 @@ TextDelivery deliverNative(HWND editor, const std::wstring& text, HWND foregroun
     if (!message(editor, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(text.c_str()), ignored)) {
         delivery.status = L"unconfirmed"; return delivery;
     }
+    delivery.submitted = true;
     std::wstring after;
-    if (!readText(editor, after)) { delivery.status = L"unconfirmed"; return delivery; }
-    delivery.submitted = after == expected;
-    const auto suffix = before.substr(end);
-    if (after.size() >= start + suffix.size() && after.compare(0, start, before, 0, start) == 0 &&
+    if (!readText(editor, after)) { delivery.status = L"submitted_unverified"; return delivery; }
+    after = normalizedLines(after);
+    const auto prefix = normalizedLines(before.substr(0, start));
+    const auto suffix = normalizedLines(before.substr(end));
+    if (after.size() >= prefix.size() + suffix.size() && after.compare(0, prefix.size(), prefix) == 0 &&
         after.compare(after.size() - suffix.size(), suffix.size(), suffix) == 0)
-        delivery.observed = after.substr(start, after.size() - start - suffix.size());
-    delivery.status = delivery.submitted ? L"verified" : L"mismatch";
+        delivery.observed = after.substr(prefix.size(), after.size() - prefix.size() - suffix.size());
+    if (after == normalizedLines(before) && after != expected) {
+        delivery.submitted = false; delivery.status = L"rejected";
+    } else delivery.status = after == expected ? L"verified" : L"mismatch";
     return delivery;
 }
 bool copyUnicode(HWND owner, const std::wstring& text) {
@@ -131,7 +155,16 @@ int runTextDeliverySmoke() {
     HWND ansi = CreateWindowExA(0, "EDIT", "unchanged", WS_POPUP, 0, 0, 300, 100, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     const auto unsupported = deliverNative(ansi, text);
     std::wstring ansiAfter; readText(ansi, ansiAfter); DestroyWindow(ansi);
-    return legacyExact && exact && !readonly.submitted && after == std::wstring(L"prefix:") + text + L":suffix" &&
+    HMODULE richRuntime = LoadLibraryW(L"Msftedit.dll");
+    HWND rich = CreateWindowExW(0, L"RICHEDIT50W", L"prefix:\r\nOLD:suffix", WS_POPUP | ES_MULTILINE,
+        0, 0, 300, 100, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    SendMessageW(rich, EM_SETSEL, 8, 11);
+    const auto richResult = deliverNative(rich, text);
+    std::wstring richAfter; readText(rich, richAfter); DestroyWindow(rich);
+    if (richRuntime) FreeLibrary(richRuntime);
+    const bool richExact = richResult.submitted && richResult.status == L"verified" && richResult.observed == text &&
+        normalizedLines(richAfter) == std::wstring(L"prefix:\n") + text + L":suffix";
+    return richExact && legacyExact && exact && !readonly.submitted && after == std::wstring(L"prefix:") + text + L":suffix" &&
         !unsupported.submitted && ansiAfter == L"unchanged" ? 0 : 151;
 }
 }

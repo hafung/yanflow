@@ -129,7 +129,8 @@ worker 常驻，仅在推理线程访问；开启后在后台立即加载，菜�
 `raw` 是原始 ASR，`final` 是自动纠错后的待输出文字；两者相同表示纠错没有修改。
 `recognition_id` 与 `timestamp_filetime` 区分第一遍、第二遍和分段结果；`macbert_status` /
 `macbert_error` 记录模型状态及原因。`delivery_status` 为 `verified` 才表示标准文本框已核验，
-`observed_inserted` 是实际插入部分；`mismatch` / `unconfirmed` 表示不能确认一致并保留气泡，
+`observed_inserted` 是实际插入部分；`mismatch` 表示控件已接受插入但读回文字与请求不同，只记录诊断，不重复弹出全文；
+`unconfirmed` 表示送入失败或超时、结果未知，保留气泡。`rejected` 表示控件未接受插入。
 `bubble` 表示未送入，`submitted_unverified` 表示已请求粘贴但未验证。普通应用未核验时
 `observed_inserted` 为空，不能把空值当作实际没有文字。
 把 `expected` 填为人工听写的正确文本。将多条合并成 UTF-8 JSONL，至少包含已识别正确的
@@ -169,3 +170,31 @@ rapidfuzz。它不是当前 worker 的现成热词解码器。
 
 模型来源：[MacBERT4CSC](https://huggingface.co/shibing624/macbert4csc-base-chinese)、
 [固定 ONNX 转换](https://huggingface.co/Xenova/macbert4csc-base-chinese/tree/7ebfe81cf502576e93c844b95354840b2ecb5c28)。
+
+
+## 术语识别与持续改进
+
+精确词库改善最终文本，不改变声学模型或贪心 CTC 解码。对于已确认念的是 Node.js、却输出
+`note ZS` 或 `noZS` 的情况，可在“纠正并记住”分别保存两条“误词 → 正确词”，上下文填“最新”，
+范围选择产生这次结果的应用；只记术语，不把整句保存成固定答案：
+
+```text
+term	note ZS	Node.js	最新
+term	noZS	Node.js	最新
+```
+
+也可以在记事本获得焦点时，右键“应用词库 → 编辑此应用专用词库”，一次加入上面两条
+TAB 分隔规则；保存后下一次识别生效。此方式可以加入已经确认、但当前最近结果中未出现的别名。
+
+例如 `noZS最新版本是什么？` 的术语会变为 `Node.js`，相同术语可以出现在不同句子里。
+这不会修复剩余的“版板”等中文错误，也不会覆盖未记录的其他误词。MacBERT 不纠正英文术语。
+
+持续改进应使用同一批真实录音和人工真值，至少覆盖 Node.js / npm / TypeScript 等术语、普通中文、
+中英混合、以及本来识别正确的对照句。单独统计原始 ASR 字符错误率、术语命中率、纠错后误改、
+延迟与内存；词库调参句与测试句分开。录音需要用户主动准备，本应用不会自动保存录音。
+
+识别阶段的下一步是评测 CTC prefix beam search 与热词偏置，或比较支持热词的其他模型。
+[SenseVoice 上游](https://github.com/QwenAudio/SenseVoice)列出了 CTC prefix beam / hot-word boosting
+及其他热词方案；[Fun-ASR 上游](https://github.com/QwenAudio/Fun-ASR)展示了 `hotwords` 参数。
+这些能力尚未接入当前 Windows GGUF worker，不把上游示例当作当前包已支持或 Node.js 准确率已提高
+的证据。接入前还需要固定实现和模型版本、SHA-256，并测量 Windows CPU 性能及误改。

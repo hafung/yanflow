@@ -1,6 +1,8 @@
 #include "text-correction.h"
 #include "hold-hotkey.h"
 #include <limits>
+#include <algorithm>
+#include <array>
 
 namespace yanflow {
 int runTextCorrectionSmoke()
@@ -56,6 +58,21 @@ int runTextCorrectionSmoke()
     if (keys.key('S', true) != A::Release || keys.key('S', false) != A::None) return 97;
     keys.reset(); keys.key(0xa2, true); keys.key(0x5b, true); keys.key(0xa3, true);
     if (keys.key(0xa2, false) != A::None || keys.key(0xa3, false) != A::Release) return 98;
+    std::array<uint32_t, 3> chord{0x5b, 0xa0, 0xa2};
+    std::sort(chord.begin(), chord.end());
+    do {
+        ListeningToggleHotkey toggle;
+        if (toggle.key(chord[0], true) || toggle.key(chord[1], true) || !toggle.key(chord[2], true) ||
+            toggle.key(chord[2], true) || toggle.key(chord[2], false) || toggle.key(chord[2], true)) return 160;
+        for (auto vk : chord) toggle.key(vk, false);
+        toggle.key(chord[0], true); toggle.key(chord[1], true);
+        if (!toggle.key(chord[2], true)) return 161;
+    } while (std::next_permutation(chord.begin(), chord.end()));
+    ListeningToggleHotkey toggle;
+    toggle.key(0xa3, true); toggle.key(0x5c, true);
+    if (toggle.key(0xa1, true, true) || !toggle.key(0xa1, true)) return 162;
+    toggle.reset(); toggle.key(0xa2, true); toggle.key(0xa4, true); toggle.key(0x5b, true);
+    if (toggle.key(0xa0, true)) return 163;
     return 0;
 }
 } // namespace yanflow

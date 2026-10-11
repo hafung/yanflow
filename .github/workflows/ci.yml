@@ -41,6 +41,10 @@ jobs:
         shell: cmd
         run: build\windows\test-yanflow-correction.cmd
 
+      - name: Verify popup delivery state and adaptive controls without a microphone
+        shell: cmd
+        run: build\windows\test-yanflow-ui.cmd
+
       - name: Verify native imports and extracted portable package
         shell: cmd
         run: build\windows\test-yanflow-native.cmd
