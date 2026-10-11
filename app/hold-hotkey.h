@@ -23,6 +23,7 @@ public:
         return false;
     }
     void reset() { keys_ = 0; latched_ = blocked_ = false; }
+    uint32_t modifierKeys() const { return keys_; }
 private:
     uint32_t keys_ = 0;
     bool latched_ = false, blocked_ = false;
@@ -60,6 +61,7 @@ public:
         return next ? Action::Press : Action::Release;
     }
     bool active() const { return active_; }
+    uint32_t modifierKeys() const { return keys_; }
     bool chord() const { return (keys_ & 3) && (keys_ & 12); }
     void reset() { keys_ = 0; active_ = false; blocked_ = false; }
 private:

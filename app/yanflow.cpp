@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include "yanflow.h"
 #include "hold-hotkey.h"
+#include "keyboard-listener.h"
 #include "text-correction.h"
 #include "text-pipeline.h"
 #include "audio-segmentation.h"
@@ -643,10 +644,11 @@ public:
 
     int run()
     {
-        if (smokeMilliseconds_ == -8) {
+        if (smokeMilliseconds_ == -8 || smokeMilliseconds_ == -14) {
             wchar_t temporary[MAX_PATH]{};
             if (!GetTempPathW(MAX_PATH, temporary)) return 130;
-            dictionarySmokeRoot_ = std::wstring(temporary) + L"YanFlow-learn-" + std::to_wstring(GetCurrentProcessId());
+            dictionarySmokeRoot_ = std::wstring(temporary) + (smokeMilliseconds_ == -14 ? L"YanFlow-hotkey-" : L"YanFlow-learn-") +
+                std::to_wstring(GetCurrentProcessId());
             if (!CreateDirectoryW(dictionarySmokeRoot_.c_str(), nullptr)) return 131;
         }
         instance_ = GetModuleHandleW(nullptr);
@@ -664,13 +666,12 @@ public:
             exitCode_ = 70;
         }
         loadSettings();
-        if (smokeMilliseconds_ == -12 || smokeMilliseconds_ == -13) cscEnabled_.store(false);
+        if (smokeMilliseconds_ == -12 || smokeMilliseconds_ == -13 || smokeMilliseconds_ == -14) cscEnabled_.store(false);
         if (smokeMilliseconds_ > 0 && !runComparisonSmoke()) exitCode_ = 158;
         workerRunning_.store(true, std::memory_order_release);
         endpointThread_ = std::thread(&YanFlowApp::endpointLoop, this);
         inferenceThread_ = std::thread(&YanFlowApp::inferenceLoop, this);
-        hookOwner_ = this;
-        keyboardHook_ = SetWindowsHookExW(WH_KEYBOARD_LL, &YanFlowApp::keyboardProcedure, instance_, 0);
+        keyboardListener_.start(window_, kMessageHold, kMessageListeningToggle, holdEnabled_, smokeMilliseconds_ == -14);
         WTSRegisterSessionNotification(window_, NOTIFY_FOR_THIS_SESSION);
         registerConfiguredHotkeys(startHotkey_, stopHotkey_, false);
         RegisterHotKey(window_, kHotkeyVisibility, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'H');
@@ -694,6 +695,9 @@ public:
             saved = saved && saveUiPreview(L"yanflow-ui-copied.bmp", true);
             exitCode_ = saved && shortBubbleSize.cx < longBubbleSize.cx && shortBubbleSize.cy < longBubbleSize.cy && longBubbleSize.cx <= kBubbleWidth &&
                 longBubbleSize.cy <= kBubbleMaximumHeight ? 0 : 159;
+            SetTimer(window_, kTimerSmoke, 200, nullptr);
+        } else if (smokeMilliseconds_ == -14) {
+            exitCode_ = runHotkeyStartupSmoke();
             SetTimer(window_, kTimerSmoke, 200, nullptr);
         } else if (smokeMilliseconds_ == -13) {
             exitCode_ = runUiStateSmoke();
@@ -770,36 +774,6 @@ public:
     }
 
 private:
-    static LRESULT CALLBACK keyboardProcedure(int code, WPARAM message, LPARAM parameter)
-    {
-        if (code == HC_ACTION && hookOwner_ != nullptr) {
-            const auto* key = reinterpret_cast<const KBDLLHOOKSTRUCT*>(parameter);
-            const bool down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
-            const bool up = message == WM_KEYUP || message == WM_SYSKEYUP;
-            if ((down || up) && (key->flags & LLKHF_INJECTED) == 0) {
-                const bool toggle = hookOwner_->toggleKeys_.key(key->vkCode, down);
-                const auto action = hookOwner_->holdEnabled_ ? hookOwner_->holdKeys_.key(key->vkCode, down) : yanflow::HoldHotkey::Action::None;
-                if (toggle || action == yanflow::HoldHotkey::Action::Press) {
-                    // Pass both modifier downs/ups through so Windows and the
-                    // foreground app never see a stuck modifier. An unassigned
-                    // injected key masks Start-menu activation on Win release.
-                    INPUT mask[2]{};
-                    mask[0].type = mask[1].type = INPUT_KEYBOARD;
-                    mask[0].ki.wVk = mask[1].ki.wVk = 0xe8;
-                    mask[1].ki.dwFlags = KEYEVENTF_KEYUP;
-                    SendInput(2, mask, sizeof(INPUT));
-                }
-                if (toggle) PostMessageW(hookOwner_->window_, kMessageListeningToggle, 0, 0);
-                else if (action != yanflow::HoldHotkey::Action::None) {
-                    // The hook only tracks keys and posts; audio work runs on the UI/worker threads.
-                    PostMessageW(hookOwner_->window_, kMessageHold,
-                        action == yanflow::HoldHotkey::Action::Press ? 1 : 0, 0);
-                }
-            }
-        }
-        return CallNextHookEx(nullptr, code, message, parameter);
-    }
-
     static LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
     {
         YanFlowApp* self = reinterpret_cast<YanFlowApp*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -916,18 +890,22 @@ private:
             return 0;
         case kMessageHold:
             if (wParam != 0) {
-                if (holdEnabled_ && holdKeys_.active() && settingsWindow_ == nullptr && learnWindow_ == nullptr && dictionaryWindow_ == nullptr && !listening_.load() &&
-                    (GetAsyncKeyState(VK_CONTROL) & 0x8000) &&
-                    ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN)) & 0x8000)) {
-                    startListening(true);
+                if (holdEnabled_ && keyboardListener_.holdActive() && !listening_.load() && pendingStart_ != PendingStart::Realtime) {
+                    pendingStart_ = PendingStart::Hold;
+                    startPendingListening();
                 }
-            } else if (holdSession_.load(std::memory_order_acquire)) stopListening();
+            } else {
+                if (pendingStart_ == PendingStart::Hold) pendingStart_ = PendingStart::None;
+                if (holdSession_.load(std::memory_order_acquire) && listening_.load()) stopListening();
+            }
             return 0;
         case WM_WTSSESSION_CHANGE:
             if (wParam == WTS_SESSION_LOCK || wParam == WTS_REMOTE_DISCONNECT || wParam == WTS_CONSOLE_DISCONNECT) stopListening();
+            if (wParam == WTS_SESSION_UNLOCK || wParam == WTS_REMOTE_CONNECT || wParam == WTS_CONSOLE_CONNECT) keyboardListener_.refresh();
             return 0;
         case WM_POWERBROADCAST:
             if (wParam == PBT_APMSUSPEND) stopListening();
+            if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) keyboardListener_.refresh();
             return TRUE;
         case WM_COMMAND:
             if (LOWORD(wParam) == kCommandToggle) toggleListening();
@@ -1001,10 +979,10 @@ private:
                 return 0;
             }
             if (wParam == kTimerHold) {
+                startPendingListening();
                 if (smokeMilliseconds_ == -11) finishStreamingSmoke();
                 if (smokeMilliseconds_ != -7 && smokeMilliseconds_ != -9 && smokeMilliseconds_ != -10 && holdSession_.load(std::memory_order_acquire) && listening_.load() &&
-                    (!(GetAsyncKeyState(VK_CONTROL) & 0x8000) ||
-                     !((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN)) & 0x8000) ||
+                    (!keyboardListener_.holdActive() ||
                      GetTickCount64() - holdStartedTick_ >= kMaximumHoldMilliseconds)) stopListening();
                 return 0;
             }
@@ -1047,9 +1025,7 @@ private:
             paint();
             return 0;
         case WM_DESTROY:
-            if (keyboardHook_ != nullptr) UnhookWindowsHookEx(keyboardHook_);
-            keyboardHook_ = nullptr;
-            hookOwner_ = nullptr;
+            keyboardListener_.stop();
             WTSUnRegisterSessionNotification(window_);
             UnregisterHotKey(window_, kHotkeyStart);
             UnregisterHotKey(window_, kHotkeyStop);
@@ -1105,6 +1081,8 @@ private:
         }
         if (lastNativeThreadInfo_ && info.hwndFocus && IsChild(foreground, info.hwndFocus))
             lastNativeFocusState_ = nativeEditState(info.hwndFocus);
+        // Native controls already answer this; do not cold-start UIA needlessly.
+        if (lastNativeFocusState_ >= 0) return lastNativeFocusState_ == 1;
         lastAutomationFocusStatus_ = E_FAIL;
         lastAutomationControlType_ = 0;
         IUIAutomationElement* element = nullptr;
@@ -1113,7 +1091,6 @@ private:
             lastAutomationFocusStatus_ = element->get_CurrentControlType(&lastAutomationControlType_);
         }
         if (element) element->Release();
-        if (lastNativeFocusState_ >= 0) return lastNativeFocusState_ == 1;
         return SUCCEEDED(lastAutomationFocusStatus_) &&
             (lastAutomationControlType_ == UIA_EditControlTypeId || lastAutomationControlType_ == UIA_DocumentControlTypeId);
     }
@@ -1124,7 +1101,9 @@ private:
             HWND foreground = GetForegroundWindow();
             if (foreground != nullptr && foreground != window_) {
                 targetWindow_ = foreground;
-                targetWasEditable_ = focusedElementAcceptsText();
+                // Classify only when delivering a result. A slow external UIA
+                // provider must not delay the start of microphone capture.
+                targetWasEditable_ = false;
             }
         }
     }
@@ -1133,9 +1112,27 @@ private:
     {
         if (listening_.load(std::memory_order_acquire)) {
             stopListening();
+        } else if (pendingStart_ == PendingStart::Realtime) {
+            pendingStart_ = PendingStart::None;
         } else {
-            startListening();
+            pendingStart_ = PendingStart::Realtime;
+            startPendingListening();
         }
+    }
+
+    void startPendingListening()
+    {
+        if (pendingStart_ == PendingStart::None) return;
+        if (settingsWindow_ || learnWindow_ || dictionaryWindow_ || listening_.load() ||
+            (pendingStart_ == PendingStart::Hold && (!holdEnabled_ || !keyboardListener_.holdActive()))) {
+            pendingStart_ = PendingStart::None; return;
+        }
+        // Preserve this press until the endpoint thread finishes draining the
+        // previous session; releasing a hold cancels the pending request.
+        if (captureDrainPending_.load(std::memory_order_acquire)) return;
+        const bool hold = pendingStart_ == PendingStart::Hold;
+        pendingStart_ = PendingStart::None;
+        startListening(hold);
     }
 
     void startListening(bool hold = false)
@@ -1149,7 +1146,10 @@ private:
         }
         holdSession_.store(hold, std::memory_order_release);
         holdStartedTick_ = GetTickCount64();
-        if (!capture_.start()) {
+        bool started = false;
+        if (smokeMilliseconds_ == -14) { ++smokeCaptureStarts_; started = true; }
+        else started = capture_.start();
+        if (!started) {
             holdSession_.store(false, std::memory_order_release);
             state_ = ListeningState::Error;
             fallbackText_ = capture_.noInputDevice()
@@ -1173,6 +1173,7 @@ private:
 
     void stopListening()
     {
+        pendingStart_ = PendingStart::None;
         if (!listening_.load(std::memory_order_acquire)) return;
         captureDrainPending_.store(true, std::memory_order_release);
         capture_.stop();
@@ -1600,7 +1601,7 @@ private:
         stopHotkey_ = stop;
         holdEnabled_ = SendMessageW(GetDlgItem(settingsWindow_, kSettingsHold), BM_GETCHECK, 0, 0) == BST_CHECKED;
         if (!holdEnabled_ && holdSession_.load()) stopListening();
-        holdKeys_.reset(); toggleKeys_.reset();
+        keyboardListener_.configure(holdEnabled_);
         persistSettings();
         DestroyWindow(settingsWindow_);
         return true;
@@ -1667,7 +1668,7 @@ private:
             WS_CHILD | WS_VISIBLE | WS_TABSTOP, 125, 96, 220, 28, settingsWindow_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsStop)), instance_, nullptr);
         HWND holdControl = CreateWindowExW(0, L"BUTTON",
-            keyboardHook_ ? L"Ctrl+Win：按住录音，松开识别" : L"Ctrl+Win：键盘监听不可用，请重启",
+            keyboardListener_.available() ? L"Ctrl+Win：按住录音，松开识别" : L"Ctrl+Win：键盘监听不可用，请重启",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
             28, 139, 360, 24, settingsWindow_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsHold)), instance_, nullptr);
@@ -1699,10 +1700,10 @@ private:
         if (menuApplication_.empty()) menuApplication_ = lastRecognition_.application;
         HMENU menu = CreatePopupMenu();
         const std::wstring listeningLabel = (listening_.load() ? L"关闭实时监听\t" : L"开启实时监听\t") +
-            std::wstring(keyboardHook_ ? L"Ctrl+Win+Shift" : L"键盘监听不可用");
+            std::wstring(keyboardListener_.available() ? L"Ctrl+Win+Shift" : L"键盘监听不可用");
         AppendMenuW(menu, MF_STRING, kCommandToggle, listeningLabel.c_str());
         AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, holdEnabled_
-            ? (keyboardHook_ ? L"按住录音\tCtrl+Win" : L"按住录音：键盘监听不可用") : L"按住录音：已关闭");
+            ? (keyboardListener_.available() ? L"按住录音\tCtrl+Win" : L"按住录音：键盘监听不可用") : L"按住录音：已关闭");
         AppendMenuW(menu, MF_STRING | (fallbackText_.empty() ? MF_GRAYED : 0), kCommandCopy,
             L"复制文本\tCtrl+Alt+C");
         AppendMenuW(menu, MF_STRING | (!fallbackIsTranscript_ || fallbackText_.empty() ? MF_GRAYED : 0),
@@ -1879,6 +1880,7 @@ private:
             const size_t count = recording || captureDrainPending_.load(std::memory_order_acquire)
                 ? capture_.read(frame.data(), frame.size(), !recording) : 0;
             if (!recording && count == 0) {
+                if (smokeMilliseconds_ == -14 && smokePauseDrain_.load()) { Sleep(4); continue; }
                 if (wasListening) flush(held);
                 speech = false; voicedFrames = silentFrames = 0;
                 speechVoicedFrames = ownedBegin = streamOffset = 0; continuation = false;
@@ -1971,7 +1973,7 @@ private:
     void inferenceLoop()
     {
         unsigned int cscRevision = ~0u;
-        if (smokeMilliseconds_ <= 0 && smokeMilliseconds_ != -3 && smokeMilliseconds_ != -8 && smokeMilliseconds_ != -12 && smokeMilliseconds_ != -13) {
+        if (smokeMilliseconds_ <= 0 && smokeMilliseconds_ != -3 && smokeMilliseconds_ != -8 && smokeMilliseconds_ != -12 && smokeMilliseconds_ != -13 && smokeMilliseconds_ != -14) {
             std::wstring error;
             if (!asrWorker_.warmup(executableDirectory(), error)) {
                 PostMessageW(window_, kMessageStatus, static_cast<WPARAM>(ListeningState::Error),
@@ -2202,6 +2204,107 @@ private:
         const bool saved = yanflow::writeUtf8File(joinPath(executableDirectory(), L"yanflow-long-result.txt"), smokeTranscript_);
         exitCode_ = saved && !streamingSmokeError_ ? 0 : 134;
         DestroyWindow(window_);
+    }
+
+    int runHotkeyStartupSmoke()
+    {
+        if (!keyboardListener_.available()) return 180;
+        holdEnabled_ = true; keyboardListener_.configure(true);
+        const auto key = [this](uint32_t vk, bool down, bool injected = false) { return keyboardListener_.testKey(vk, down, injected); };
+        const auto pump = [this] {
+            MSG message{};
+            while (PeekMessageW(&message, window_, kMessageHold, kMessageListeningToggle, PM_REMOVE)) DispatchMessageW(&message);
+        };
+        const auto drained = [this] {
+            for (int i = 0; i < 200 && captureDrainPending_.load(); ++i) Sleep(5);
+            return !captureDrainPending_.load();
+        };
+        if (!keyboardListener_.testReleasedSnapshot(0)) return 181;
+        // First chord at startup: hook state is authoritative even with no
+        // physical keys held (async-state polling would reject this trace).
+        if (!key(VK_CONTROL, true) || !key(VK_LWIN, true)) return 182;
+        pump();
+        if (!listening_.load() || !holdSession_.load() || smokeCaptureStarts_ != 1) return 183;
+        if (!key(VK_LWIN, true)) return 184;
+        pump();
+        if (smokeCaptureStarts_ != 1 || !key(VK_LWIN, false) || !key(VK_CONTROL, false)) return 184;
+        pump();
+        if (listening_.load() || !drained()) return 185;
+        // UI stalled longer than the low-level hook timeout; the input thread
+        // still consumes/acknowledges keys before the UI pumps any messages.
+        Sleep(1200);
+        if (!key(VK_RWIN, true) || !key(VK_RCONTROL, true)) return 186;
+        Sleep(100);
+        if (!keyboardListener_.holdActive() || listening_.load()) return 187;
+        pump();
+        if (!listening_.load() || smokeCaptureStarts_ != 2) return 188;
+        // Simulate omitted key-up notifications while idle; release-only
+        // reconciliation must clear the latch before the next first chord.
+        if (!keyboardListener_.testReleasedSnapshot(0)) return 189;
+        pump();
+        if (listening_.load() || !drained()) return 190;
+        SendMessageW(window_, WM_POWERBROADCAST, PBT_APMRESUMEAUTOMATIC, 0);
+        if (!keyboardListener_.testReleasedSnapshot(0) || !key(VK_LCONTROL, true) || !key(VK_LWIN, true)) return 190;
+        pump();
+        if (!listening_.load() || smokeCaptureStarts_ != 3 || !keyboardListener_.testReleasedSnapshot(0)) return 191;
+        pump(); if (!drained()) return 192;
+        // A held press during drain is deferred, not discarded. Early release
+        // cancels it, so recording cannot start later after the user lets go.
+        smokePauseDrain_.store(true); captureDrainPending_.store(true);
+        if (!key(VK_LCONTROL, true) || !key(VK_LWIN, true)) return 193;
+        pump();
+        if (pendingStart_ != PendingStart::Hold || listening_.load() || smokeCaptureStarts_ != 3) return 194;
+        if (!keyboardListener_.testReleasedSnapshot(0)) return 195;
+        pump(); smokePauseDrain_.store(false);
+        if (!drained()) return 196;
+        SendMessageW(window_, WM_TIMER, kTimerHold, 0);
+        if (pendingStart_ != PendingStart::None || listening_.load() || smokeCaptureStarts_ != 3) return 197;
+        smokePauseDrain_.store(true); captureDrainPending_.store(true);
+        if (!key(VK_LWIN, true) || !key(VK_LCONTROL, true)) return 198;
+        pump();
+        if (pendingStart_ != PendingStart::Hold || listening_.load()) return 199;
+        smokePauseDrain_.store(false);
+        if (!drained()) return 200;
+        SendMessageW(window_, WM_TIMER, kTimerHold, 0);
+        if (!listening_.load() || !holdSession_.load() || smokeCaptureStarts_ != 4) return 201;
+        // The third modifier converts the same capture to realtime; releasing
+        // the modifiers leaves it running, and the next full chord stops it.
+        if (!key(VK_LSHIFT, true)) return 202;
+        pump();
+        if (!listening_.load() || holdSession_.load() || smokeCaptureStarts_ != 4) return 203;
+        if (!keyboardListener_.testReleasedSnapshot(0)) return 204;
+        pump(); if (!listening_.load()) return 205;
+        if (!key(VK_LSHIFT, true) || !key(VK_LCONTROL, true) || !key(VK_LWIN, true)) return 206;
+        pump();
+        if (listening_.load() || !keyboardListener_.testReleasedSnapshot(0) || !drained()) return 207;
+        pump();
+        // Polling/injected input cannot manufacture a hold or toggle.
+        if (!keyboardListener_.testReleasedSnapshot(15) || !key(VK_LCONTROL, true, true) ||
+            !key(VK_LWIN, true, true) || !key(VK_LSHIFT, true, true)) return 208;
+        pump();
+        if (listening_.load() || keyboardListener_.holdActive() || smokeCaptureStarts_ != 4) return 209;
+        // A triple chord during drain retains a realtime request after all
+        // keys are released, and starts once the previous session is drained.
+        smokePauseDrain_.store(true); captureDrainPending_.store(true);
+        if (!key(VK_LCONTROL, true) || !key(VK_LWIN, true) || !key(VK_LSHIFT, true)) return 210;
+        pump();
+        if (pendingStart_ != PendingStart::Realtime || listening_.load() || !keyboardListener_.testReleasedSnapshot(0)) return 211;
+        pump();
+        if (!key(VK_LCONTROL, true) || !key(VK_LWIN, true)) return 215;
+        pump();
+        if (pendingStart_ != PendingStart::Realtime || !key(VK_LSHIFT, true)) return 216;
+        pump();
+        if (pendingStart_ != PendingStart::None || listening_.load() || !keyboardListener_.testReleasedSnapshot(0)) return 217;
+        pump();
+        if (!key(VK_LCONTROL, true) || !key(VK_LWIN, true) || !key(VK_LSHIFT, true)) return 218;
+        pump();
+        if (pendingStart_ != PendingStart::Realtime || !keyboardListener_.testReleasedSnapshot(0)) return 219;
+        pump(); smokePauseDrain_.store(false);
+        if (!drained()) return 212;
+        SendMessageW(window_, WM_TIMER, kTimerHold, 0);
+        if (!listening_.load() || holdSession_.load() || smokeCaptureStarts_ != 5) return 213;
+        stopListening();
+        return drained() ? 0 : 214;
     }
 
     int runUiStateSmoke()
@@ -2532,10 +2635,11 @@ private:
     }
 
     HINSTANCE instance_ = nullptr;
-    inline static YanFlowApp* hookOwner_ = nullptr;
-    HHOOK keyboardHook_ = nullptr;
-    yanflow::HoldHotkey holdKeys_;
-    yanflow::ListeningToggleHotkey toggleKeys_;
+    yanflow::KeyboardListener keyboardListener_;
+    enum class PendingStart { None, Hold, Realtime };
+    PendingStart pendingStart_ = PendingStart::None;
+    unsigned int smokeCaptureStarts_ = 0;
+    std::atomic<bool> smokePauseDrain_{false};
     bool holdEnabled_ = true;
     uint64_t holdStartedTick_ = 0;
     HWND window_ = nullptr;
