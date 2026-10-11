@@ -19,13 +19,14 @@ $yanflow = Join-Path $package "yanflow.exe"
 $sample = Join-Path $repoRoot "build\deps\yanflow\source\sensevoice-v0.1.9\runtime\llama.cpp\tests\sample.wav"
 $fixture = Join-Path $package "yanflow-asr-smoke.wav"
 $diagnostic = Join-Path $package "yanflow-e2e-diagnostic.txt"
+$comparison = Join-Path $package "yanflow-e2e-comparison.jsonl"
 $ready = Join-Path $repoRoot "build\artifacts\yanflow-textbox-ready.txt"
 $result = Join-Path $repoRoot "build\artifacts\yanflow-textbox-result.txt"
 $targetScript = Join-Path $PSScriptRoot "yanflow-textbox-target.ps1"
 foreach ($path in @($yanflow, $sample, $targetScript)) {
     if (-not (Test-Path $path)) { throw "Textbox E2E dependency missing: $path" }
 }
-Remove-Item -Force -ErrorAction SilentlyContinue $ready, $result, $diagnostic
+Remove-Item -Force -ErrorAction SilentlyContinue $ready, $result, $diagnostic, $comparison
 Copy-Item -Force $sample $fixture
 $target = $null
 try {
@@ -85,9 +86,13 @@ try {
     }
     if (-not (Test-Path $result)) { throw "Target produced no injection evidence" }
     $actual = [IO.File]::ReadAllText($result, [Text.Encoding]::UTF8)
+    $pair = [IO.File]::ReadAllText($comparison, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    if ($actual -ne ("YANFLOW-E2E:" + $pair.final) -or $pair.observed_inserted -ne $pair.final -or $pair.delivery_status -ne "verified") {
+        throw "Textbox contents do not exactly match the exported final result"
+    }
     Write-Host "PASS yanflow-textbox-e2e text=$actual"
 } finally {
     if ($null -ne $target -and -not $target.HasExited) { $target.Kill() }
     if ($null -ne $target) { $target.Dispose() }
-    Remove-Item -Force -ErrorAction SilentlyContinue $fixture, $ready, $result, $diagnostic, "$ready.focus.json"
+    Remove-Item -Force -ErrorAction SilentlyContinue $fixture, $ready, $result, $diagnostic, $comparison, "$ready.focus.json"
 }

@@ -12,6 +12,9 @@ if errorlevel 1 exit /b %errorlevel%
 call "%~dp0build-yanflow-gui.cmd"
 if errorlevel 1 exit /b %errorlevel%
 
+call "%~dp0setup-yanflow-csc.cmd"
+if errorlevel 1 exit /b %errorlevel%
+
 call "%~dp0setup-yanflow.cmd" "%DEPS_DIR%"
 if errorlevel 1 exit /b %errorlevel%
 
@@ -26,6 +29,10 @@ start "" /wait "%PACKAGE_DIR%\yanflow.exe" --text-smoke
 if errorlevel 1 exit /b 80
 start "" /wait "%PACKAGE_DIR%\yanflow.exe" --accuracy-smoke
 if errorlevel 1 exit /b 110
+start "" /wait "%PACKAGE_DIR%\yanflow.exe" --text-delivery-smoke
+if errorlevel 1 exit /b 150
+start "" /wait "%PACKAGE_DIR%\yanflow.exe" --csc-pipeline-smoke
+if errorlevel 1 exit /b 153
 
 if not defined YANFLOW_SKIP_ASR_SMOKE (
     copy /y "%DEPS_DIR%\source\sensevoice-v0.1.9\runtime\llama.cpp\tests\sample.wav" "%PACKAGE_DIR%\yanflow-asr-smoke.wav" >nul

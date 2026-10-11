@@ -6,8 +6,7 @@ $archive = Join-Path $artifacts "YanFlow-native-windows-x64.zip"
 $sample = Join-Path $repoRoot "build\deps\yanflow\source\sensevoice-v0.1.9\runtime\llama.cpp\tests\sample.wav"
 $dumpbin = (Get-Command dumpbin.exe -ErrorAction Stop).Source
 
-$executables = @("yanflow.exe", "funasr\yanflow-asr-worker.exe")
-if (Test-Path (Join-Path $package "csc")) { $executables += "csc\yanflow-csc-worker.exe" }
+$executables = @("yanflow.exe", "funasr\yanflow-asr-worker.exe", "csc\yanflow-csc-worker.exe")
 foreach ($relativePath in $executables) {
     $executable = Join-Path $package $relativePath
     $headers = (& $dumpbin /headers $executable) -join "`n"
@@ -79,6 +78,8 @@ try {
     $yanflow = Join-Path $extracted "yanflow.exe"
     Invoke-Smoke $yanflow "--smoke" 0
     Invoke-Smoke $yanflow "--text-smoke" 0
+    Invoke-Smoke $yanflow "--text-delivery-smoke" 0
+    Invoke-Smoke $yanflow "--csc-pipeline-smoke" 0
     $cscWorker = Join-Path $extracted "csc\yanflow-csc-worker.exe"
     if (Test-Path $cscWorker) { Invoke-Smoke $cscWorker "--smoke" 0 }
     Invoke-Smoke $yanflow "--asr-smoke" 20

@@ -15,7 +15,7 @@
   · <a href="#english">English</a>
 </p>
 
-![YanFlow running locally](assets/screenshots/yanflow-running.png)
+![YanFlow native fallback interface — rendered preview](assets/screenshots/yanflow-running.png)
 
 > **Video / 视频** — The moving picture belongs here. Demo coming soon. 影像证词，稍后抵达。
 
@@ -52,16 +52,24 @@ PyTorch，更不要求独立显卡。模型由常驻 worker 只加载一次，�
 
 词典先做明确的大小写规范和术语映射；音近词必须列出误识别形式和同句上下文，默认不做
 模糊猜测。右键选择“编辑自定义词典”，保存后下一次识别生效。MacBERT4CSC 是默认关闭的
-可选本地 C++ worker，只接受高置信度中文单字替换，并保护词典术语、英文、数字和可识别的代码片段。
-资源缺失、超时或异常时保留第一阶段结果。基础包仍不需要 Python 或额外运行时安装。
+本地 C++ worker，模型随标准包附带，只接受高置信度中文单字替换，并保护词典术语、英文、数字和可识别的代码片段。
+资源缺失、超时或异常时保留第一阶段结果。安装包无需 Python 或额外运行时安装；菜单可查看加载失败的具体原因。
 
-右键“保存最近识别对照”可导出原始 ASR 和最终文本，人工校对后评测 CER 和误改。
+右键“保存最近识别对照”可导出本次运行最近 20 条原始 ASR、纠错结果及输出核验状态，人工校对后评测 CER 和误改。
 右键“纠正并记住”可确认误词→正确词，默认只用于这次录音的目标应用，并复制本次正确文本。
+记住的是用户确认的替换规则，不训练模型，也不自动推断新的误词。
 “应用词库”可选择自动、通用或开发词库；应用专用词库叠加在所选词库上，升级不会覆盖个人规则。
 启用可选模型、词典格式及三阶段评测方法见 [纠错说明](docs/text-correction.md)。
 
 Windows 可能在首次使用麦克风时请求权限。普通权限进程不能向管理员权限窗口注入文本，
 这是 Windows UIPI 的边界，不是言流在故作矜持。
+
+GitHub ZIP 当前未使用受信任的代码签名，首次启动可能出现 SmartScreen“无法识别的应用”
+提示。请先确认来自本项目 Release，并核对 ZIP 的 SHA-256；确认信任该下载后，可以在
+提示中选择“更多信息 → 仍要运行”（组织策略可能不允许）。无需关闭 Defender 或 SmartScreen。
+发行者需要受信任的代码签名并积累下载信誉，或通过 Microsoft Store 分发来改善此提示；
+修改图标、版本信息或使用自签名证书都不能保证消除警告，EV 证书也不再保证首次免提示。
+参见 [微软的 SmartScreen 说明](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)。
 
 ## English
 
@@ -96,8 +104,8 @@ by incantation—it is simply kept inside deliberate boundaries.
    Right-click the orb to remap hands-free keys or disable hold mode.
 
 An editable dictionary normalizes explicit terms conservatively. Optional MacBERT4CSC is disabled
-by default and only accepts tightly gated Chinese character edits; dictionary terms, English,
-numbers, and recognizable code are protected. Export the last raw/final pair from the orb menu to
+by default, included in every standard package, and only accepts tightly gated Chinese character edits; dictionary terms, English,
+numbers, and recognizable code are protected. Export up to 20 recent raw/final pairs with delivery verification from the orb menu to
 measure improvements against a human transcript. See [correction details](docs/text-correction.md).
 
 Windows may request microphone permission on first use. A normal process cannot inject text into an
@@ -143,9 +151,9 @@ build\windows\test-yanflow-accuracy.cmd
 The native-package check verifies PE imports, creates `build\artifacts\YanFlow-native-windows-x64.zip`
 and its `SHA256SUMS-native.txt`, then extracts and runs the application from a path containing
 spaces and Unicode. It also checks the missing-wave and missing-worker exit codes.
-When the optional CSC bundle is present, it verifies its app-local DLL dependencies and runs the
-actual model from the extracted path. To build that bundle, run `build\windows\setup-yanflow-csc.cmd`,
-then `build\windows\build-yanflow.cmd`; ONNX Runtime and the model are pinned and SHA-256 checked.
+Every standard build includes CSC. The check verifies its app-local DLL dependencies and exercises
+the actual model through the main application from the extracted path. Run
+`build\windows\build-yanflow.cmd`; ONNX Runtime and the model are pinned and SHA-256 checked.
 
 ## Boundaries / 边界
 

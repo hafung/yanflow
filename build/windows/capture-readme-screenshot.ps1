@@ -17,8 +17,8 @@ $process = Start-Process (Join-Path $package "yanflow.exe") -ArgumentList "--rea
 try {
     Start-Sleep -Seconds 7
     $work = [Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-    $width = 520
-    $height = 136
+    $width = 480
+    $height = 112
     $bitmap = [Drawing.Bitmap]::new($width, $height)
     $graphics = [Drawing.Graphics]::FromImage($bitmap)
     try {

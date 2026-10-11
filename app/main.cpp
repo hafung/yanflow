@@ -9,12 +9,19 @@
 #include "text-pipeline.h"
 #include "audio-segmentation.h"
 #include "dictionary-store.h"
+#include "text-delivery.h"
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
     int argumentCount = 0;
     wchar_t** arguments = CommandLineToArgvW(GetCommandLineW(), &argumentCount);
     if (arguments == nullptr) return 2;
+    if (argumentCount == 2 && std::wcscmp(arguments[1], L"--csc-pipeline-smoke") == 0) {
+        LocalFree(arguments); return yanflow::runCscPipelineSmoke();
+    }
+    if (argumentCount == 2 && std::wcscmp(arguments[1], L"--text-delivery-smoke") == 0) {
+        LocalFree(arguments); return yanflow::runTextDeliverySmoke();
+    }
     if (argumentCount >= 2 && std::wcscmp(arguments[1], L"--correct-text") == 0) {
         const int result = argumentCount == 4 || (argumentCount == 5 && std::wcscmp(arguments[4], L"--macbert") == 0)
             ? yanflow::correctTextFile(arguments[2], arguments[3], argumentCount == 5) : 2;
@@ -43,6 +50,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         else if (std::wcscmp(option, L"--short-hold-smoke") == 0) smokeMilliseconds = -9;
         else if (std::wcscmp(option, L"--long-hold-smoke") == 0) smokeMilliseconds = -10;
         else if (std::wcscmp(option, L"--long-stream-smoke") == 0) smokeMilliseconds = -11;
+        else if (std::wcscmp(option, L"--ui-preview-smoke") == 0) smokeMilliseconds = -12;
     }
     LocalFree(arguments);
 

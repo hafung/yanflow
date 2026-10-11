@@ -7,6 +7,7 @@
 #include "audio-segmentation.h"
 #include "asr-protocol.h"
 #include "dictionary-store.h"
+#include "text-delivery.h"
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
@@ -39,6 +40,7 @@ constexpr UINT kMessageResult = WM_APP + 1;
 constexpr UINT kMessageStatus = WM_APP + 2;
 constexpr UINT kMessageHold = WM_APP + 3;
 constexpr UINT kMessageStreamingDone = WM_APP + 4;
+constexpr UINT kMessageCsc = WM_APP + 5;
 constexpr UINT_PTR kTimerSmoke = 1;
 constexpr UINT_PTR kTimerPipelineStop = 2;
 constexpr UINT_PTR kTimerCopyFeedback = 4;
@@ -63,6 +65,7 @@ constexpr int kCommandProfileDevelopment = 110;
 constexpr int kCommandAppDictionary = 111;
 constexpr int kCommandLearn = 112;
 constexpr int kCommandDevelopmentDictionary = 113;
+constexpr int kCommandCscDetails = 114;
 constexpr int kLearnPreview = 300;
 constexpr int kLearnSource = 301;
 constexpr int kLearnTarget = 302;
@@ -82,9 +85,15 @@ constexpr size_t kRingSamples = kSampleRate * 30;
 constexpr size_t kMaximumUtteranceSamples = kSampleRate * 8;
 constexpr uint64_t kIdleTimeoutMilliseconds = 30000;
 constexpr uint64_t kMaximumHoldMilliseconds = 60000;
-constexpr int kCollapsedSize = 72;
-constexpr int kBubbleWidth = 520;
-constexpr int kBubbleHeight = 136;
+constexpr int kCollapsedSize = 64;
+constexpr int kBubbleWidth = 480;
+constexpr int kBubbleHeight = 112;
+
+RECT bubbleActionRect(bool write, bool transcript = true)
+{
+    const int top = transcript ? (kBubbleHeight - 64) / 2 : (kBubbleHeight - 28) / 2;
+    return {kBubbleWidth - 68, top + (write ? 36 : 0), kBubbleWidth - 12, top + (write ? 36 : 0) + 28};
+}
 
 struct HotkeyBinding {
     UINT modifiers = 0;
@@ -128,8 +137,11 @@ enum class ListeningState {
 
 struct RecognitionResult {
     std::wstring raw, final, application;
-    uint64_t serial = 0;
+    uint64_t serial = 0, timestamp = 0;
+    std::wstring correctionStatus, correctionError, manualCorrection;
+    yanflow::TextDelivery delivery;
 };
+struct CscStatus { unsigned int revision; bool ready; std::wstring error; };
 
 std::wstring executableDirectory()
 {
@@ -649,6 +661,8 @@ public:
             exitCode_ = 70;
         }
         loadSettings();
+        if (smokeMilliseconds_ == -12) cscEnabled_.store(false);
+        if (smokeMilliseconds_ > 0 && !runComparisonSmoke()) exitCode_ = 158;
         workerRunning_.store(true, std::memory_order_release);
         endpointThread_ = std::thread(&YanFlowApp::endpointLoop, this);
         inferenceThread_ = std::thread(&YanFlowApp::inferenceLoop, this);
@@ -663,7 +677,12 @@ public:
         SetTimer(window_, kTimerIdle, 1000, nullptr);
         SetTimer(window_, kTimerHold, 50, nullptr);
         if (smokeMilliseconds_ < 0) exitCode_ = 60;
-        if (smokeMilliseconds_ == -8) {
+        if (smokeMilliseconds_ == -12) {
+            fallbackText_ = L"没有可写的输入框时，识别文字会留在这里。\n可以复制，也可以写入桌面 TXT。";
+            fallbackIsTranscript_ = true;
+            exitCode_ = saveUiPreview(L"yanflow-ui-collapsed.bmp", false) && saveUiPreview(L"yanflow-ui-bubble.bmp", true) ? 0 : 159;
+            SetTimer(window_, kTimerSmoke, 200, nullptr);
+        } else if (smokeMilliseconds_ == -8) {
             const bool passed = runLearnSmoke();
             exitCode_ = passed ? 0 : 132;
             SetTimer(window_, kTimerSmoke, 200, nullptr);
@@ -807,9 +826,9 @@ private:
         SetLayeredWindowAttributes(window_, 0, 245, LWA_ALPHA);
         SetWindowRgn(window_, CreateRoundRectRgn(0, 0, kCollapsedSize, kCollapsedSize, 24, 24), TRUE);
         floatingIcon_ = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(2), IMAGE_ICON,
-            52, 52, LR_DEFAULTCOLOR | LR_SHARED));
+            kCollapsedSize, kCollapsedSize, LR_DEFAULTCOLOR | LR_SHARED));
         listeningIcon_ = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(3), IMAGE_ICON,
-            52, 52, LR_DEFAULTCOLOR | LR_SHARED));
+            kCollapsedSize, kCollapsedSize, LR_DEFAULTCOLOR | LR_SHARED));
         return true;
     }
 
@@ -819,16 +838,18 @@ private:
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
         case WM_LBUTTONDOWN:
-            if (bubbleExpanded_ && GET_X_LPARAM(lParam) >=
-                kBubbleWidth - (fallbackIsTranscript_ ? 120 : 60)) {
-                if (!fallbackIsTranscript_ || GET_X_LPARAM(lParam) < kBubbleWidth - 60) {
+            if (bubbleExpanded_) {
+                const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                const auto copy = bubbleActionRect(false, fallbackIsTranscript_);
+                const auto write = bubbleActionRect(true);
+                if (PtInRect(&copy, point)) {
                     copiedFeedback_ = copyFallback();
                     if (copiedFeedback_) SetTimer(window_, kTimerCopyFeedback, 1200, nullptr);
-                } else {
-                    writeFallbackToDesktop(true);
+                    InvalidateRect(window_, nullptr, FALSE); return 0;
                 }
-                InvalidateRect(window_, nullptr, FALSE);
-                return 0;
+                if (fallbackIsTranscript_ && PtInRect(&write, point)) {
+                    writeFallbackToDesktop(true); return 0;
+                }
             }
             dragOrigin_.x = GET_X_LPARAM(lParam);
             dragOrigin_.y = GET_Y_LPARAM(lParam);
@@ -898,13 +919,28 @@ private:
             }
             if (LOWORD(wParam) == kCommandCompare) saveRecognitionComparison();
             if (LOWORD(wParam) == kCommandCsc) {
-                cscEnabled_.store(!cscEnabled_.load());
-                cscRevision_.fetch_add(1);
-                cscFailed_.store(false);
+                {
+                    std::lock_guard<std::mutex> lock(queueMutex_);
+                    cscEnabled_.store(!cscEnabled_.load());
+                    cscRevision_.fetch_add(1);
+                }
+                cscFailed_.store(false); cscReady_.store(false); cscError_.clear();
+                queueChanged_.notify_one();
                 persistSettings();
+            }
+            if (LOWORD(wParam) == kCommandCscDetails) {
+                MessageBoxW(window_, cscError_.empty() ? L"MacBERT 模型随完整安装包提供。开启后会在后台加载。" : cscError_.c_str(),
+                    L"MacBERT 加载诊断", MB_OK | MB_ICONINFORMATION);
             }
             if (LOWORD(wParam) == kCommandExit) DestroyWindow(window_);
             return 0;
+        case kMessageCsc: {
+            auto* status = reinterpret_cast<CscStatus*>(lParam);
+            if (status->revision == cscRevision_.load()) {
+                cscReady_.store(status->ready); cscFailed_.store(!status->error.empty()); cscError_ = status->error;
+            }
+            delete status; return 0;
+        }
         case kMessageResult:
             acceptResult(reinterpret_cast<RecognitionResult*>(lParam));
             return 0;
@@ -1310,7 +1346,11 @@ private:
             MessageBoxW(learnWindow_, error.c_str(), L"记住纠正", MB_OK | MB_ICONWARNING); return false;
         }
         const bool sameResult = lastRecognition_.serial == learningResult_.serial;
-        if (sameResult) lastManualCorrection_ = corrected;
+        for (auto& item : recentRecognitions_)
+            if (item.serial == learningResult_.serial) item.manualCorrection = corrected;
+        if (sameResult) {
+            lastManualCorrection_ = corrected; lastRecognition_.manualCorrection = corrected;
+        }
         if (sameResult && fallbackIsTranscript_ && fallbackText_.size() >= learningResult_.final.size() &&
             fallbackText_.compare(fallbackText_.size() - learningResult_.final.size(), learningResult_.final.size(), learningResult_.final) == 0) {
             fallbackText_.replace(fallbackText_.size() - learningResult_.final.size(), learningResult_.final.size(), corrected);
@@ -1399,6 +1439,7 @@ private:
     bool runLearnSmoke()
     {
         lastRecognition_ = {L"语音识别支持热此", L"语音识别支持热此", L"yanflow-learning-smoke.exe"};
+        recentRecognitions_.push_back(lastRecognition_);
         showLearnWindow();
         if (!learnWindow_) return false;
         if (applicationForWindow(learnWindow_) != L"yanflow.exe") return false;
@@ -1407,7 +1448,8 @@ private:
         SetWindowTextW(GetDlgItem(learnWindow_, kLearnContext), L"语音识别");
         SendMessageW(learnWindow_, WM_COMMAND, kLearnSave, 0);
         if (learnWindow_ || fallbackText_ != L"语音识别支持热词" ||
-            lastRecognition_.final != L"语音识别支持热此") return false;
+            lastRecognition_.final != L"语音识别支持热此" || recentRecognitions_.back().final != lastRecognition_.final ||
+            recentRecognitions_.back().manualCorrection != fallbackText_) return false;
         yanflow::TextPipeline pipeline;
         const auto raw = L"语音识别支持热此";
         const auto learned = pipeline.correct(raw, executableDirectory(), dictionaryPath(), false,
@@ -1664,9 +1706,11 @@ private:
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(dictionaries), title.c_str());
         AppendMenuW(menu, MF_STRING | (lastRecognition_.raw.empty() ? MF_GRAYED : 0), kCommandLearn, L"纠正并记住...");
         AppendMenuW(menu, MF_STRING | (cscEnabled_.load() ? MF_CHECKED : 0), kCommandCsc,
-            cscFailed_.load() ? L"MacBERT 中文纠错（不可用，已回退；关闭后重试）" : L"MacBERT 中文纠错（可选模型）");
+            cscFailed_.load() ? L"MacBERT 中文纠错（加载失败，已回退）" :
+                !cscEnabled_.load() ? L"MacBERT 中文纠错（已关闭）" : cscReady_.load() ? L"MacBERT 中文纠错（已就绪）" : L"MacBERT 中文纠错（正在加载）");
+        if (cscFailed_.load()) AppendMenuW(menu, MF_STRING, kCommandCscDetails, L"查看 MacBERT 加载失败原因...");
         AppendMenuW(menu, MF_STRING | (lastRecognition_.raw.empty() ? MF_GRAYED : 0), kCommandCompare,
-            L"保存最近识别对照...");
+            (L"保存最近识别对照（" + std::to_wstring(recentRecognitions_.size()) + L"条）...").c_str());
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, kCommandExit, L"退出言流");
         POINT cursor = {};
@@ -1676,23 +1720,20 @@ private:
         DestroyMenu(menu);
     }
 
-    void paint()
+    void paintContent(HDC memory, RECT rect)
     {
-        PAINTSTRUCT paintStruct = {};
-        HDC target = BeginPaint(window_, &paintStruct);
-        RECT rect = {};
-        GetClientRect(window_, &rect);
-        HDC memory = CreateCompatibleDC(target);
-        HBITMAP bitmap = CreateCompatibleBitmap(target, rect.right, rect.bottom);
-        HGDIOBJ oldBitmap = SelectObject(memory, bitmap);
         HBRUSH background = CreateSolidBrush(RGB(24, 27, 38));
         FillRect(memory, &rect, background);
         DeleteObject(background);
 
         HICON currentIcon = (state_ == ListeningState::Listening ||
             state_ == ListeningState::Recognizing) ? listeningIcon_ : floatingIcon_;
+        const bool expanded = rect.right > kCollapsedSize;
+        const int iconSize = expanded ? 40 : kCollapsedSize;
+        const int iconLeft = expanded ? 16 : 0;
+        const int iconTop = (rect.bottom - iconSize) / 2;
         if (currentIcon != nullptr) {
-            DrawIconEx(memory, 10, 10, currentIcon, 52, 52, 0, nullptr, DI_NORMAL);
+            DrawIconEx(memory, iconLeft, iconTop, currentIcon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
         } else {
             HBRUSH circle = CreateSolidBrush(RGB(30, 86, 214));
             SelectObject(memory, circle);
@@ -1709,52 +1750,85 @@ private:
             DeleteObject(micPen);
         }
 
-        if (rect.right > 72) {
+        if (expanded) {
             SetBkMode(memory, TRANSPARENT);
             SetTextColor(memory, RGB(238, 241, 250));
-            HFONT font = CreateFontW(-17, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            HFONT font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH, L"Microsoft YaHei UI");
             HGDIOBJ oldFont = SelectObject(memory, font);
-            RECT textRect = {82, 14, rect.right - (fallbackIsTranscript_ ? 130 : 70), rect.bottom - 14};
+            RECT textRect = {72, 12, rect.right - 80, rect.bottom - 12};
+            RECT measured = textRect;
+            DrawTextW(memory, fallbackText_.c_str(), -1, &measured, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+            textRect.top += std::max(0L, (textRect.bottom - textRect.top - (measured.bottom - measured.top)) / 2);
             DrawTextW(memory, fallbackText_.c_str(), -1, &textRect,
                 DT_LEFT | DT_VCENTER | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX);
             SelectObject(memory, oldFont);
             DeleteObject(font);
 
-            HPEN divider = CreatePen(PS_SOLID, 1, RGB(61, 68, 88));
-            SelectObject(memory, divider);
-            const int actionLeft = rect.right - (fallbackIsTranscript_ ? 120 : 60);
-            MoveToEx(memory, actionLeft, 20, nullptr);
-            LineTo(memory, actionLeft, rect.bottom - 20);
-            DeleteObject(divider);
-            SetTextColor(memory, copiedFeedback_ ? RGB(112, 224, 173) : RGB(164, 211, 255));
-            HFONT actionFont = CreateFontW(-15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            HFONT actionFont = CreateFontW(-13, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH, L"Microsoft YaHei UI");
             oldFont = SelectObject(memory, actionFont);
-            RECT actionRect = {actionLeft + 2, 16, actionLeft + 58, rect.bottom - 16};
-            DrawTextW(memory, copiedFeedback_ ? L"已复制" : L"复制", -1, &actionRect,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            if (fallbackIsTranscript_) {
-                divider = CreatePen(PS_SOLID, 1, RGB(61, 68, 88));
-                SelectObject(memory, divider);
-                MoveToEx(memory, rect.right - 60, 20, nullptr);
-                LineTo(memory, rect.right - 60, rect.bottom - 20);
-                DeleteObject(divider);
-                SetTextColor(memory, RGB(255, 199, 122));
-                RECT writeRect = {rect.right - 58, 16, rect.right - 4, rect.bottom - 16};
-                DrawTextW(memory, L"写入", -1, &writeRect,
+            const auto action = [&](bool write) {
+                auto button = bubbleActionRect(write, fallbackIsTranscript_);
+                HBRUSH brush = CreateSolidBrush(RGB(36, 42, 57));
+                auto oldBrush = SelectObject(memory, brush);
+                auto oldPen = SelectObject(memory, GetStockObject(NULL_PEN));
+                RoundRect(memory, button.left, button.top, button.right, button.bottom, 10, 10);
+                SelectObject(memory, oldPen); SelectObject(memory, oldBrush); DeleteObject(brush);
+                SetTextColor(memory, write ? RGB(255, 199, 122) : copiedFeedback_ ? RGB(112, 224, 173) : RGB(164, 211, 255));
+                DrawTextW(memory, write ? L"写入" : copiedFeedback_ ? L"已复制" : L"复制", -1, &button,
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            }
+            };
+            action(false);
+            if (fallbackIsTranscript_) action(true);
             SelectObject(memory, oldFont);
             DeleteObject(actionFont);
         }
+    }
+
+    void paint()
+    {
+        PAINTSTRUCT paintStruct{};
+        HDC target = BeginPaint(window_, &paintStruct);
+        RECT rect{}; GetClientRect(window_, &rect);
+        HDC memory = CreateCompatibleDC(target);
+        HBITMAP bitmap = CreateCompatibleBitmap(target, rect.right, rect.bottom);
+        auto oldBitmap = SelectObject(memory, bitmap);
+        paintContent(memory, rect);
         BitBlt(target, 0, 0, rect.right, rect.bottom, memory, 0, 0, SRCCOPY);
-        SelectObject(memory, oldBitmap);
-        DeleteObject(bitmap);
-        DeleteDC(memory);
+        SelectObject(memory, oldBitmap); DeleteObject(bitmap); DeleteDC(memory);
         EndPaint(window_, &paintStruct);
+    }
+
+    bool saveUiPreview(const wchar_t* name, bool expanded)
+    {
+        const int width = expanded ? kBubbleWidth : kCollapsedSize;
+        const int height = expanded ? kBubbleHeight : kCollapsedSize;
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = width; info.bmiHeader.biHeight = -height;
+        info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32; info.bmiHeader.biCompression = BI_RGB;
+        void* pixels = nullptr;
+        HDC memory = CreateCompatibleDC(nullptr);
+        HBITMAP bitmap = CreateDIBSection(memory, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+        if (!memory || !bitmap || !pixels) { if (bitmap) DeleteObject(bitmap); if (memory) DeleteDC(memory); return false; }
+        auto old = SelectObject(memory, bitmap);
+        paintContent(memory, RECT{0, 0, width, height});
+        GdiFlush();
+        BITMAPFILEHEADER header{};
+        header.bfType = 0x4d42; header.bfOffBits = sizeof(header) + sizeof(info.bmiHeader);
+        const DWORD bytes = width * height * 4;
+        header.bfSize = header.bfOffBits + bytes;
+        FILE* file = nullptr;
+        const auto path = joinPath(executableDirectory(), name);
+        const bool opened = _wfopen_s(&file, path.c_str(), L"wb") == 0 && file;
+        bool saved = opened && fwrite(&header, sizeof(header), 1, file) == 1 &&
+            fwrite(&info.bmiHeader, sizeof(info.bmiHeader), 1, file) == 1 && fwrite(pixels, bytes, 1, file) == 1;
+        if (file && fclose(file)) saved = false;
+        SelectObject(memory, old); DeleteObject(bitmap); DeleteDC(memory);
+        return saved;
     }
 
     void endpointLoop()
@@ -1875,22 +1949,33 @@ private:
 
     void inferenceLoop()
     {
-        unsigned int cscRevision = cscRevision_.load();
-        if (smokeMilliseconds_ <= 0 && smokeMilliseconds_ != -3 && smokeMilliseconds_ != -8) {
+        unsigned int cscRevision = ~0u;
+        if (smokeMilliseconds_ <= 0 && smokeMilliseconds_ != -3 && smokeMilliseconds_ != -8 && smokeMilliseconds_ != -12) {
             std::wstring error;
             if (!asrWorker_.warmup(executableDirectory(), error)) {
                 PostMessageW(window_, kMessageStatus, static_cast<WPARAM>(ListeningState::Error),
                     reinterpret_cast<LPARAM>(new std::wstring(error)));
             }
         }
+        const auto reportCsc = [this](unsigned int revision, bool ready) {
+            auto* status = new CscStatus{revision, ready, textPipeline_.cscError()};
+            if (!PostMessageW(window_, kMessageCsc, 0, reinterpret_cast<LPARAM>(status))) delete status;
+        };
         while (workerRunning_.load(std::memory_order_acquire)) {
+            const auto requestedRevision = cscRevision_.load();
+            if (requestedRevision != cscRevision) {
+                textPipeline_.resetCsc(); cscRevision = requestedRevision;
+                const bool ready = cscEnabled_.load() && textPipeline_.warmupCsc(executableDirectory());
+                reportCsc(cscRevision, ready);
+            }
             QueuedUtterance utterance;
             {
                 std::unique_lock<std::mutex> lock(queueMutex_);
-                queueChanged_.wait(lock, [this] {
-                    return !workerRunning_.load(std::memory_order_acquire) || !utterances_.empty();
+                queueChanged_.wait(lock, [this, cscRevision] {
+                    return !workerRunning_.load(std::memory_order_acquire) || !utterances_.empty() || cscRevision_.load() != cscRevision;
                 });
                 if (!workerRunning_.load(std::memory_order_acquire)) break;
+                if (cscRevision_.load() != cscRevision) continue;
                 utterance = std::move(utterances_.front());
                 utterances_.pop_front();
             }
@@ -1902,11 +1987,17 @@ private:
                 result->raw = text;
                 result->application = utterance.application;
                 result->serial = utterance.serial;
+                FILETIME time{}; GetSystemTimePreciseAsFileTime(&time);
+                result->timestamp = (static_cast<uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
                 const auto revision = cscRevision_.load();
                 if (revision != cscRevision) { textPipeline_.resetCsc(); cscRevision = revision; }
-                result->final = textPipeline_.correct(text, executableDirectory(), dictionaryPath(), cscEnabled_.load(),
+                const bool enabled = cscEnabled_.load();
+                result->final = textPipeline_.correct(text, executableDirectory(), dictionaryPath(), enabled,
                     dictionaryLayers(utterance.application));
-                cscFailed_.store(textPipeline_.cscFailed());
+                result->correctionStatus = !enabled ? L"disabled" : textPipeline_.cscFailed() ? L"failed" :
+                    text.size() > 4096 ? L"skipped_length" : L"ready";
+                result->correctionError = textPipeline_.cscError();
+                reportCsc(cscRevision, enabled && !textPipeline_.cscFailed());
                 if (!PostMessageW(window_, kMessageResult, 0, reinterpret_cast<LPARAM>(result))) delete result;
             } else if (!error.empty()) {
                 PostMessageW(window_, kMessageStatus, static_cast<WPARAM>(ListeningState::Error),
@@ -1989,7 +2080,10 @@ private:
         }
         const bool targetValid = targetWindow_ != nullptr && IsWindow(targetWindow_);
         const bool foregroundMatch = GetForegroundWindow() == targetWindow_;
-        const bool injected = targetValid && targetWasEditable_ && foregroundMatch && injectText(text);
+        if (targetValid && targetWasEditable_ && foregroundMatch)
+            lastRecognition_.delivery = yanflow::deliverText(targetWindow_, window_, text);
+        const bool injected = lastRecognition_.delivery.submitted;
+        retainRecognition(lastRecognition_);
         if (injected) {
             fallbackText_.clear();
             fallbackIsTranscript_ = false;
@@ -2019,10 +2113,12 @@ private:
                     wideToUtf8(lastForegroundClass_).c_str(), wideToUtf8(lastNativeFocusClass_).c_str());
                 fclose(diagnostic);
             }
+            yanflow::writeUtf8File(joinPath(executableDirectory(), L"yanflow-e2e-comparison.jsonl"), recognitionComparisonJson());
             exitCode_ = injected ? 0 : 61;
             DestroyWindow(window_);
         } else if (smokeMilliseconds_ == -2) {
-            const LPARAM copyPoint = MAKELPARAM(kBubbleWidth - 90, kBubbleHeight / 2);
+            const auto copyRect = bubbleActionRect(false);
+            const LPARAM copyPoint = MAKELPARAM((copyRect.left + copyRect.right) / 2, (copyRect.top + copyRect.bottom) / 2);
             SendMessageW(window_, WM_LBUTTONDOWN, MK_LBUTTON, copyPoint);
             SendMessageW(window_, WM_LBUTTONUP, 0, copyPoint);
             RECT rect = {};
@@ -2083,30 +2179,31 @@ private:
         DestroyWindow(window_);
     }
 
-    bool injectText(const std::wstring& text)
+    void retainRecognition(const RecognitionResult& result)
     {
-        if (text.empty() || targetWindow_ == nullptr) return false;
-        if (GetForegroundWindow() != targetWindow_) {
-            return false;
-        }
-        std::vector<INPUT> inputs;
-        inputs.reserve(text.size() * 2);
-        for (wchar_t unit : text) {
-            INPUT down = {};
-            down.type = INPUT_KEYBOARD;
-            down.ki.wScan = unit;
-            down.ki.dwFlags = KEYEVENTF_UNICODE;
-            INPUT up = down;
-            up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-            inputs.push_back(down);
-            inputs.push_back(up);
-        }
-        return SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT)) == inputs.size();
+        recentRecognitions_.push_back(result);
+        if (recentRecognitions_.size() > 20) recentRecognitions_.pop_front();
     }
 
-    void saveRecognitionComparison()
+    bool runComparisonSmoke()
     {
-        if (lastRecognition_.raw.empty()) return;
+        for (uint64_t i = 1; i <= 22; ++i) {
+            RecognitionResult item{L"note ZS的最新版板是什？", L"note ZS的最新版板是什？", L"notepad.exe"};
+            item.serial = i;
+            item.delivery = {true, L"verified", L"unicode_edit", item.final};
+            retainRecognition(item);
+        }
+        recentRecognitions_.back().manualCorrection = L"Node.js 的最新版本是什么？\n\"引用\"";
+        const auto json = recognitionComparisonJson();
+        const bool passed = recentRecognitions_.size() == 20 && recentRecognitions_.front().serial == 3 &&
+            json.find(L"\"recognition_id\":3,") < json.find(L"\"recognition_id\":22,") &&
+            json.find(L"Node.js 的最新版本是什么？\\u000a\\\"引用\\\"") != std::wstring::npos &&
+            json.find(L"\"observed_inserted\":\"note ZS的最新版板是什？\"") != std::wstring::npos;
+        recentRecognitions_.clear(); return passed;
+    }
+
+    std::wstring recognitionComparisonJson() const
+    {
         const auto escape = [](const std::wstring& value) {
             std::wstring json = L"\"";
             for (wchar_t c : value) {
@@ -2118,6 +2215,20 @@ private:
             }
             return json + L"\"";
         };
+        std::wstring json;
+        for (const auto& item : recentRecognitions_) {
+            json += L"{\"recognition_id\":" + std::to_wstring(item.serial) + L",\"timestamp_filetime\":" + std::to_wstring(item.timestamp) +
+                L",\"raw\":" + escape(item.raw) + L",\"final\":" + escape(item.final) + L",\"application\":" + escape(item.application) +
+                L",\"macbert_status\":" + escape(item.correctionStatus) + L",\"macbert_error\":" + escape(item.correctionError) +
+                L",\"delivery_status\":" + escape(item.delivery.status) + L",\"delivery_method\":" + escape(item.delivery.method) +
+                L",\"observed_inserted\":" + escape(item.delivery.observed) + L",\"manual_correction\":" + escape(item.manualCorrection) + L",\"expected\":\"\"}\n";
+        }
+        return json;
+    }
+
+    void saveRecognitionComparison()
+    {
+        if (lastRecognition_.raw.empty()) return;
         PWSTR desktop = nullptr;
         if (FAILED(SHGetKnownFolderPath(FOLDERID_Desktop, KF_FLAG_CREATE, nullptr, &desktop))) return;
         FILETIME timestamp{};
@@ -2126,11 +2237,9 @@ private:
         stamp.LowPart = timestamp.dwLowDateTime; stamp.HighPart = timestamp.dwHighDateTime;
         const auto path = joinPath(desktop, L"YanFlow-correction-" + std::to_wstring(stamp.QuadPart) + L".jsonl");
         CoTaskMemFree(desktop);
-        const std::wstring json = L"{\"raw\":" + escape(lastRecognition_.raw) + L",\"final\":" +
-            escape(lastRecognition_.final) + L",\"application\":" + escape(lastRecognition_.application) +
-            L",\"manual_correction\":" + escape(lastManualCorrection_) + L",\"expected\":\"\"}\n";
+        const auto json = recognitionComparisonJson();
         const bool saved = yanflow::writeUtf8File(path, json);
-        MessageBoxW(window_, saved ? (L"已保存识别前后对照到：\n" + path + L"\n请填写人工校对的 expected 文本后评测。").c_str()
+        MessageBoxW(window_, saved ? (L"已保存本次运行最近最多 20 条识别对照到：\n" + path + L"\n请填写人工校对的 expected 文本后评测。").c_str()
             : L"无法保存识别对照，请检查桌面写入权限。", L"言流识别对照", MB_OK | (saved ? MB_ICONINFORMATION : MB_ICONWARNING));
     }
 
@@ -2255,7 +2364,11 @@ private:
         fallbackText_ = L"滨海新区有房，继续测试写入。";
         fallbackIsTranscript_ = true;
         expandBubble();
-        if (!writeFallbackToDesktop(false) || lastWrittenPath_.empty()) return false;
+        const auto writeRect = bubbleActionRect(true);
+        const LPARAM writePoint = MAKELPARAM((writeRect.left + writeRect.right) / 2, (writeRect.top + writeRect.bottom) / 2);
+        SendMessageW(window_, WM_LBUTTONDOWN, MK_LBUTTON, writePoint);
+        SendMessageW(window_, WM_LBUTTONUP, 0, writePoint);
+        if (lastWrittenPath_.empty()) return false;
         const size_t slash = lastWrittenPath_.find_last_of(L"\\/");
         const std::wstring fileName = slash == std::wstring::npos
             ? lastWrittenPath_ : lastWrittenPath_.substr(slash + 1);
@@ -2354,7 +2467,8 @@ private:
     yanflow::TranscriptBoundaryMerger transcriptMerger_;
     uint64_t previousTranscriptSerial_ = 0;
     std::atomic<bool> cscEnabled_ = false;
-    std::atomic<bool> cscFailed_ = false;
+    std::atomic<bool> cscFailed_ = false, cscReady_ = false;
+    std::wstring cscError_;
     std::atomic<unsigned int> cscRevision_ = 0;
     std::thread endpointThread_;
     std::thread inferenceThread_;
@@ -2381,6 +2495,7 @@ private:
     ListeningState state_ = ListeningState::Idle;
     std::wstring fallbackText_;
     RecognitionResult lastRecognition_;
+    std::deque<RecognitionResult> recentRecognitions_;
     std::wstring lastManualCorrection_;
     std::wstring smokeTranscript_;
     std::wstring lastWrittenPath_;

@@ -18,7 +18,7 @@ try {
         throw "YanFlow fallback smoke timed out"
     }
     if ($process.ExitCode -ne 0) { throw "YanFlow fallback smoke exited with $($process.ExitCode)" }
-    Write-Host "PASS yanflow-fallback bubble=520x136 fully_visible=true copy_button=one_click clipboard=unicode"
+    Write-Host "PASS yanflow-fallback bubble=480x112 actions=one_column_56x28 fully_visible=true copy_button=one_click clipboard=unicode"
 } finally {
     Remove-Item -Force -ErrorAction SilentlyContinue $fixture
     if ($null -ne $savedClipboard) {

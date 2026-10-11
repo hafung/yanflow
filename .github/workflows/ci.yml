@@ -69,4 +69,10 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$env:GITHUB_REF_NAME" "$env:YANFLOW_ARCHIVE" SHA256SUMS --verify-tag --generate-notes --title "YanFlow $env:GITHUB_REF_NAME"
+        run: |
+          $notes = "docs/releases/$env:GITHUB_REF_NAME.md"
+          if (Test-Path -LiteralPath $notes) {
+            gh release create "$env:GITHUB_REF_NAME" "$env:YANFLOW_ARCHIVE" SHA256SUMS --verify-tag --notes-file $notes --title "YanFlow $env:GITHUB_REF_NAME"
+          } else {
+            gh release create "$env:GITHUB_REF_NAME" "$env:YANFLOW_ARCHIVE" SHA256SUMS --verify-tag --generate-notes --title "YanFlow $env:GITHUB_REF_NAME"
+          }

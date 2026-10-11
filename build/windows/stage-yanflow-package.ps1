@@ -19,11 +19,12 @@ $files = @{
     "dictionary-development.tsv" = Join-Path $repoRoot "assets\dictionary-development.tsv"
     "docs\text-correction.md" = Join-Path $repoRoot "docs\text-correction.md"
 }
-# Optional CSC resources are staged only as a complete app-local bundle.
+# Every portable package includes the complete, verified CSC bundle.
 $csc = Join-Path $dependencies "csc"
+if (-not (Test-Path -LiteralPath $csc)) { throw "Missing CSC bundle; run build\windows\build-yanflow.cmd" }
 if (Test-Path -LiteralPath $csc) {
     foreach ($required in @("yanflow-csc-worker.exe", "yanflow-onnxruntime.dll", "model.onnx", "vocab.txt", "SHA256SUMS", "LICENSE-onnxruntime.txt", "NOTICE-onnxruntime.txt", "README-model.md", "LICENSE-model.txt", "NOTICES.md", "msvcp140.dll", "msvcp140_1.dll", "vcruntime140.dll", "vcruntime140_1.dll")) {
-        if (-not (Test-Path -LiteralPath (Join-Path $csc $required))) { throw "Incomplete optional CSC bundle: $required" }
+        if (-not (Test-Path -LiteralPath (Join-Path $csc $required))) { throw "Incomplete CSC bundle: $required" }
     }
     foreach ($entry in Get-ChildItem -LiteralPath $csc -File) {
         if ($entry.Name -ne "SHA256SUMS") {

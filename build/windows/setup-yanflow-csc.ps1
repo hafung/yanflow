@@ -68,4 +68,4 @@ $hashes = Get-ChildItem -LiteralPath $staging -File | Where-Object { $_.Name -ne
 $destination = Join-Path $deps "csc"
 if (Test-Path -LiteralPath $destination) { Remove-Item -Recurse -Force -LiteralPath $destination }
 Move-Item -LiteralPath $staging -Destination $destination
-Write-Host "Optional CSC bundle ready. Run build\windows\build-yanflow.cmd to stage it; enable MacBERT from the orb menu."
+Write-Host "CSC bundle verified. Standard builds stage it automatically; enable MacBERT from the orb menu."
