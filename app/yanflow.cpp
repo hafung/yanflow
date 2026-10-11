@@ -7,6 +7,7 @@
 #include "audio-segmentation.h"
 #include "asr-protocol.h"
 #include "dictionary-store.h"
+#include "dictionary-manager.h"
 #include "text-delivery.h"
 #include <windows.h>
 #include <windowsx.h>
@@ -73,6 +74,7 @@ constexpr int kLearnContext = 303;
 constexpr int kLearnScope = 304;
 constexpr int kLearnSave = 305;
 constexpr int kLearnCancel = 306;
+constexpr int kLearnSelection = 307;
 constexpr int kSettingsStart = 200;
 constexpr int kSettingsStop = 201;
 constexpr int kSettingsSave = 202;
@@ -905,7 +907,7 @@ private:
             if (wParam == kHotkeyCopy) copyFallback();
             return 0;
         case kMessageListeningToggle:
-            if (settingsWindow_ || learnWindow_) return 0;
+            if (settingsWindow_ || learnWindow_ || dictionaryWindow_) return 0;
             if (holdSession_.load() && listening_.load()) {
                 // Ctrl+Win may already have started a hold before Shift arrives.
                 // Convert this same capture to real-time; do not stop/restart it.
@@ -914,7 +916,7 @@ private:
             return 0;
         case kMessageHold:
             if (wParam != 0) {
-                if (holdEnabled_ && holdKeys_.active() && settingsWindow_ == nullptr && learnWindow_ == nullptr && !listening_.load() &&
+                if (holdEnabled_ && holdKeys_.active() && settingsWindow_ == nullptr && learnWindow_ == nullptr && dictionaryWindow_ == nullptr && !listening_.load() &&
                     (GetAsyncKeyState(VK_CONTROL) & 0x8000) &&
                     ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN)) & 0x8000)) {
                     startListening(true);
@@ -1138,7 +1140,7 @@ private:
 
     void startListening(bool hold = false)
     {
-        if (learnWindow_ || listening_.load(std::memory_order_acquire) || captureDrainPending_.load(std::memory_order_acquire)) return;
+        if (learnWindow_ || dictionaryWindow_ || listening_.load(std::memory_order_acquire) || captureDrainPending_.load(std::memory_order_acquire)) return;
         copiedFeedback_ = false;
         rememberTarget();
         {
@@ -1251,41 +1253,26 @@ private:
         return name.empty() ? L"" : userDirectory() + L"\\dictionaries\\apps\\" + name + L".tsv";
     }
 
-    void openDictionaryEditor(const std::wstring& path, const std::wstring& templateText)
+    void openDictionaryManager(yanflow::DictionaryScope scope)
     {
-        if (path.empty()) return;
-        const auto parent = path.substr(0, path.find_last_of(L"\\/"));
-        const auto upper = parent.find_last_of(L"\\/");
-        if (upper != std::wstring::npos) CreateDirectoryW(parent.substr(0, upper).c_str(), nullptr);
-        CreateDirectoryW(parent.c_str(), nullptr);
-        if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES && !yanflow::writeUtf8File(path, templateText)) {
-            MessageBoxW(window_, L"无法创建词典，请检查写入权限。", L"言流词典", MB_OK | MB_ICONWARNING); return;
-        }
-        ShellExecuteW(window_, L"open", L"notepad.exe", quoteArgument(path).c_str(), nullptr, SW_SHOWNORMAL);
+        if (learnWindow_) { SetForegroundWindow(learnWindow_); return; }
+        if (settingsWindow_) { SetForegroundWindow(settingsWindow_); return; }
+        stopListening();
+        yanflow::showDictionaryManager(window_, dictionaryWindow_, userDirectory(), executableDirectory(), menuApplication_, scope);
     }
 
     void editApplicationDictionary()
     {
-        openDictionaryEditor(applicationDictionaryPath(menuApplication_),
-            L"# Application dictionary; overrides matching aliases in general/development dictionaries.\n# kind\tsource\tcanonical\tcontext\n");
+        openDictionaryManager(yanflow::DictionaryScope::Application);
     }
     void editDevelopmentDictionary()
     {
-        openDictionaryEditor(userDirectory() + L"\\dictionaries\\development.tsv",
-            yanflow::readUtf8File(joinPath(executableDirectory(), L"dictionary-development.tsv")));
+        openDictionaryManager(yanflow::DictionaryScope::Development);
     }
 
     void editDictionary()
     {
-        const auto settings = settingsPath();
-        const auto userDictionary = settings.substr(0, settings.find_last_of(L"\\/")) + L"\\dictionary.tsv";
-        if (GetFileAttributesW(userDictionary.c_str()) == INVALID_FILE_ATTRIBUTES &&
-            !CopyFileW(joinPath(executableDirectory(), L"dictionary.tsv").c_str(), userDictionary.c_str(), TRUE)) {
-            MessageBoxW(window_, L"无法创建自定义词典，请检查目录写入权限。", L"言流词典", MB_OK | MB_ICONWARNING);
-            return;
-        }
-        const auto argument = quoteArgument(userDictionary);
-        ShellExecuteW(window_, L"open", L"notepad.exe", argument.c_str(), nullptr, SW_SHOWNORMAL);
+        openDictionaryManager(yanflow::DictionaryScope::General);
     }
 
     static std::wstring controlText(HWND window, int id)
@@ -1402,6 +1389,15 @@ private:
         if (message == DM_GETDEFID) return MAKELONG(kLearnSave, DC_HASDEFID);
         if (message == WM_COMMAND) {
             if (LOWORD(wParam) == kLearnSave) self->rememberCorrectionFromWindow();
+            if (LOWORD(wParam) == kLearnSelection) {
+                DWORD start = 0, end = 0;
+                SendDlgItemMessageW(window, kLearnPreview, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+                const auto raw = controlText(window, kLearnPreview);
+                if (end > start && end <= raw.size() && end - start <= 128 && raw.substr(start, end - start).find_first_of(L"\r\n\t") == std::wstring::npos) {
+                    SetDlgItemTextW(window, kLearnSource, raw.substr(start, end - start).c_str());
+                    SetFocus(GetDlgItem(window, kLearnTarget));
+                } else MessageBoxW(window, L"请先在原始识别中选中一个误词（最多 128 字，不含换行）。", L"填入误词", MB_OK | MB_ICONINFORMATION);
+            }
             if (LOWORD(wParam) == kLearnCancel || LOWORD(wParam) == IDCANCEL) DestroyWindow(window);
             return 0;
         }
@@ -1412,6 +1408,7 @@ private:
 
     void showLearnWindow()
     {
+        if (dictionaryWindow_) { SetForegroundWindow(dictionaryWindow_); return; }
         if (lastRecognition_.raw.empty()) return;
         if (learnWindow_) { SetForegroundWindow(learnWindow_); return; }
         stopListening();
@@ -1433,12 +1430,14 @@ private:
                 left, top, width, height, learnWindow_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
         };
         label(L"最近原始识别（只读，可复制）", 18);
+        CreateWindowExW(0, L"BUTTON", L"选中误词后填入", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            356, 14, 158, 26, learnWindow_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLearnSelection)), instance_, nullptr);
         edit(kLearnPreview, 24, 44, 490, 64, learningResult_.raw, ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL);
-        label(L"误识别词                         正确词", 120);
-        const auto raw = learningResult_.raw.size() <= 128 ? learningResult_.raw : L"";
-        const auto final = learningResult_.final.size() <= 128 ? learningResult_.final : L"";
-        HWND source = edit(kLearnSource, 24, 146, 235, 28, raw, ES_AUTOHSCROLL);
-        HWND target = edit(kLearnTarget, 279, 146, 235, 28, final, ES_AUTOHSCROLL);
+        label(L"误识别词（只填误词）             正确词", 120);
+        HWND source = edit(kLearnSource, 24, 146, 235, 28, L"", ES_AUTOHSCROLL);
+        HWND target = edit(kLearnTarget, 279, 146, 235, 28, L"", ES_AUTOHSCROLL);
+        SendMessageW(source, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"例如：note ZS"));
+        SendMessageW(target, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"例如：Node.js"));
         label(L"上下文（建议填写；中文单字替换必填）", 190);
         HWND context = edit(kLearnContext, 24, 216, 490, 28, L"", ES_AUTOHSCROLL);
         for (HWND control : {source, target, context}) SendMessageW(control, EM_SETLIMITTEXT, 128, 0);
@@ -1458,7 +1457,7 @@ private:
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE); return TRUE;
         }, 0);
         ShowWindow(learnWindow_, SW_SHOW); SetForegroundWindow(learnWindow_);
-        SetFocus(target); SendMessageW(target, EM_SETSEL, 0, -1);
+        SetFocus(GetDlgItem(learnWindow_, kLearnPreview));
     }
 
     bool runLearnSmoke()
@@ -1484,7 +1483,10 @@ private:
         showLearnWindow();
         if (!learnWindow_) return false;
         if (applicationForWindow(learnWindow_) != L"yanflow.exe") return false;
-        SetWindowTextW(GetDlgItem(learnWindow_, kLearnSource), L"热此");
+        if (!controlText(learnWindow_, kLearnSource).empty() || !controlText(learnWindow_, kLearnTarget).empty()) return false;
+        SendDlgItemMessageW(learnWindow_, kLearnPreview, EM_SETSEL, 6, 8);
+        SendMessageW(learnWindow_, WM_COMMAND, kLearnSelection, 0);
+        if (controlText(learnWindow_, kLearnSource) != L"热此") return false;
         SetWindowTextW(GetDlgItem(learnWindow_, kLearnTarget), L"热词");
         SetWindowTextW(GetDlgItem(learnWindow_, kLearnContext), L"语音识别");
         SendMessageW(learnWindow_, WM_COMMAND, kLearnSave, 0);
@@ -1632,6 +1634,7 @@ private:
 
     void showSettings()
     {
+        if (dictionaryWindow_) { SetForegroundWindow(dictionaryWindow_); return; }
         if (settingsWindow_ != nullptr) {
             ShowWindow(settingsWindow_, SW_RESTORE);
             SetForegroundWindow(settingsWindow_);
@@ -1706,7 +1709,7 @@ private:
             kCommandWrite, L"写入桌面 TXT");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, kCommandSettings, L"快捷键设置...");
-        AppendMenuW(menu, MF_STRING, kCommandDictionary, L"编辑自定义词典...");
+        AppendMenuW(menu, MF_STRING, kCommandDictionary, L"词库管理（添加、修改、删除）...");
         HMENU dictionaries = CreatePopupMenu();
         const auto profile = dictionaryProfile(menuApplication_);
         const UINT available = menuApplication_.empty() ? MF_GRAYED : 0;
@@ -1717,8 +1720,8 @@ private:
         AppendMenuW(dictionaries, MF_STRING | available | (profile == yanflow::DictionaryProfile::Development ? MF_CHECKED : 0),
             kCommandProfileDevelopment, L"通用＋开发词库");
         AppendMenuW(dictionaries, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(dictionaries, MF_STRING | available, kCommandAppDictionary, L"编辑此应用专用词库...");
-        AppendMenuW(dictionaries, MF_STRING, kCommandDevelopmentDictionary, L"编辑开发词库...");
+        AppendMenuW(dictionaries, MF_STRING | available, kCommandAppDictionary, L"管理此应用专用词库...");
+        AppendMenuW(dictionaries, MF_STRING, kCommandDevelopmentDictionary, L"管理开发词库...");
         const auto title = menuApplication_.empty() ? L"应用词库" : L"应用词库：" + menuApplication_;
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(dictionaries), title.c_str());
         AppendMenuW(menu, MF_STRING | (lastRecognition_.raw.empty() ? MF_GRAYED : 0), kCommandLearn, L"纠正并记住...");
@@ -2538,6 +2541,7 @@ private:
     HWND window_ = nullptr;
     HWND settingsWindow_ = nullptr;
     HWND learnWindow_ = nullptr;
+    HWND dictionaryWindow_ = nullptr;
     HWND targetWindow_ = nullptr;
     HICON applicationIcon_ = nullptr;
     HICON applicationSmallIcon_ = nullptr;

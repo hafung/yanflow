@@ -5,6 +5,7 @@
 #include "text-pipeline.h"
 #include <algorithm>
 #include <cstring>
+#include <functional>
 #include <sstream>
 
 namespace yanflow {
@@ -49,7 +50,7 @@ std::vector<std::wstring> dictionaryOverlays(const std::wstring& user, const std
     if (!name.empty()) paths.push_back(user + L"\\dictionaries\\apps\\" + name + L".tsv");
     return paths;
 }
-bool rememberDictionaryRule(const std::wstring& path, const DictionaryRule& rule, std::wstring& error)
+bool validateDictionaryRule(const DictionaryRule& rule, std::wstring& error)
 {
     error.clear();
     if (rule.source == rule.target || rule.source.find_first_of(L"\t\r\n") != std::wstring::npos ||
@@ -59,6 +60,13 @@ bool rememberDictionaryRule(const std::wstring& path, const DictionaryRule& rule
     }
     TextDictionary validation;
     if (validation.load(ruleLine(rule)) != 1) { error = L"词典规则无效，请检查长度和上下文。"; return false; }
+    return true;
+}
+namespace {
+bool updateDictionaryDocument(const std::wstring& path,
+    const std::function<bool(bool, const std::wstring&, std::wstring&)>& update, std::wstring& error)
+{
+    error.clear();
     const auto slash = path.find_last_of(L"\\/");
     if (slash == std::wstring::npos) { error = L"词典路径无效。"; return false; }
     const auto directory = path.substr(0, slash);
@@ -70,31 +78,22 @@ bool rememberDictionaryRule(const std::wstring& path, const DictionaryRule& rule
     HANDLE lock = CreateFileW((path + L".lock").c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
         OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
     if (lock == INVALID_HANDLE_VALUE) { error = L"词典正在被其他进程编辑，或目录不可写，请稍后重试。"; return false; }
-    std::wstring contents;
-    if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES && !readUtf8FileChecked(path, contents)) {
+    std::wstring contents, updated;
+    const bool exists = GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (exists && !readUtf8FileChecked(path, contents)) {
         CloseHandle(lock); error = L"词典不是有效 UTF-8，或超过大小上限；已保留原文件。"; return false;
     }
-    std::wistringstream stream(contents);
-    std::wstring line, updated;
-    while (std::getline(stream, line)) {
-        if (!line.empty() && line.back() == L'\r') line.pop_back();
-        const auto first = line.find(L'\t');
-        const auto second = first == std::wstring::npos ? first : line.find(L'\t', first + 1);
-        if (!line.empty() && line.front() != L'#' && first != std::wstring::npos && second != std::wstring::npos &&
-            fold(line.substr(first + 1, second - first - 1)) == fold(rule.source)) continue;
-        updated += line + L"\n";
-    }
-    if (updated.empty()) updated = L"# YanFlow user-confirmed corrections; UTF-8 TAB-separated\n";
-    updated += ruleLine(rule) + L"\n";
+    if (!update(exists, contents, updated)) { CloseHandle(lock); return false; }
     size_t entries = 0;
     std::wistringstream countStream(updated);
+    std::wstring line;
     while (std::getline(countStream, line)) if (!line.empty() && line.front() != L'#') ++entries;
     if (entries > 2048) {
         CloseHandle(lock); error = L"词典已达到 2048 条上限，请先清理旧规则。"; return false;
     }
     const int utf8Bytes = updated.size() <= 1024 * 1024 ? WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
         updated.data(), static_cast<int>(updated.size()), nullptr, 0, nullptr, nullptr) : 0;
-    if (utf8Bytes <= 0 || utf8Bytes > 1024 * 1024) {
+    if ((!updated.empty() && utf8Bytes <= 0) || utf8Bytes > 1024 * 1024) {
         CloseHandle(lock); error = L"词典过大，已保留原文件。"; return false;
     }
     const auto temporary = path + L".partial";
@@ -103,6 +102,36 @@ bool rememberDictionaryRule(const std::wstring& path, const DictionaryRule& rule
     if (!saved) { DeleteFileW(temporary.c_str()); error = L"保存词典失败，已保留原文件，请检查写入权限。"; }
     CloseHandle(lock);
     return saved;
+}
+}
+bool saveDictionaryDocument(const std::wstring& path, bool expectedExists,
+    const std::wstring& expected, const std::wstring& updated, std::wstring& error)
+{
+    return updateDictionaryDocument(path, [&](bool exists, const std::wstring& contents, std::wstring& replacement) {
+        if (exists != expectedExists || contents != expected) {
+            error = L"词库已被其他窗口修改。请点“重新加载”后再编辑，未覆盖新内容。"; return false;
+        }
+        replacement = updated; return true;
+    }, error);
+}
+bool rememberDictionaryRule(const std::wstring& path, const DictionaryRule& rule, std::wstring& error)
+{
+    if (!validateDictionaryRule(rule, error)) return false;
+    return updateDictionaryDocument(path, [&](bool, const std::wstring& contents, std::wstring& updated) {
+        std::wistringstream stream(contents);
+        std::wstring line;
+        while (std::getline(stream, line)) {
+            if (!line.empty() && line.back() == L'\r') line.pop_back();
+            const auto first = line.find(L'\t');
+            const auto second = first == std::wstring::npos ? first : line.find(L'\t', first + 1);
+            if (!line.empty() && line.front() != L'#' && first != std::wstring::npos && second != std::wstring::npos &&
+                fold(line.substr(first + 1, second - first - 1)) == fold(rule.source)) continue;
+            updated += line + L"\n";
+        }
+        if (updated.empty()) updated = L"# YanFlow user-confirmed corrections; UTF-8 TAB-separated\n";
+        updated += ruleLine(rule) + L"\n";
+        return true;
+    }, error);
 }
 int runDictionaryStoreSmoke()
 {

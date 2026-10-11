@@ -9,6 +9,7 @@
 #include "text-pipeline.h"
 #include "audio-segmentation.h"
 #include "dictionary-store.h"
+#include "dictionary-manager.h"
 #include "text-delivery.h"
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
@@ -16,6 +17,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     int argumentCount = 0;
     wchar_t** arguments = CommandLineToArgvW(GetCommandLineW(), &argumentCount);
     if (arguments == nullptr) return 2;
+    if (argumentCount == 2 && std::wcscmp(arguments[1], L"--dictionary-manager-smoke") == 0) {
+        LocalFree(arguments); return yanflow::runDictionaryManagerSmoke();
+    }
     if (argumentCount == 2 && std::wcscmp(arguments[1], L"--csc-pipeline-smoke") == 0) {
         LocalFree(arguments); return yanflow::runCscPipelineSmoke();
     }

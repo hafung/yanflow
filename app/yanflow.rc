@@ -5,8 +5,8 @@
 3 ICON "yanflow-listening.ico"
 
 1 VERSIONINFO
-FILEVERSION 0,4,2,0
-PRODUCTVERSION 0,4,2,0
+FILEVERSION 0,4,3,0
+PRODUCTVERSION 0,4,3,0
 FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
 FILEFLAGS 0
 FILEOS VOS_NT_WINDOWS32
@@ -19,11 +19,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "YanFlow project\0"
             VALUE "FileDescription", "YanFlow local voice input\0"
-            VALUE "FileVersion", "0.4.2\0"
+            VALUE "FileVersion", "0.4.3\0"
             VALUE "InternalName", "yanflow\0"
             VALUE "OriginalFilename", "yanflow.exe\0"
             VALUE "ProductName", "YanFlow\0"
-            VALUE "ProductVersion", "0.4.2\0"
+            VALUE "ProductVersion", "0.4.3\0"
         END
     END
     BLOCK "VarFileInfo"
