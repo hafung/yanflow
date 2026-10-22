@@ -12,6 +12,7 @@ try {
         } finally { $process.Dispose() }
     }
     Write-Host "PASS delivered text stays collapsed, short/long adaptive bounds, copy/close/new text state, hold-to-realtime toggle, legacy/custom hotkey migration"
+    Write-Host "PASS caret preview adaptive bounds, negative monitor coordinates/top-edge placement, click-through/no-activate styles, stale preview rejection, hidden icon persistence/recovery"
     Write-Host "PASS dictionary manager add/edit/delete/search/preview/scopes, malformed line preservation, conflict/UTF-8/lock/stale-write guards"
     Write-Host "PASS input-thread startup/idle first chord, UI stall, missing release recovery, drain deferral/cancellation, injected input exclusion, hold/realtime transition (synthetic keys/capture)"
 } finally {

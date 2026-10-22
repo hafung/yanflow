@@ -10,6 +10,7 @@
 #include "dictionary-store.h"
 #include "dictionary-manager.h"
 #include "text-delivery.h"
+#include "recognition-preview.h"
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
@@ -19,6 +20,7 @@
 #include <shellapi.h>
 #include <uiautomation.h>
 #include <wtsapi32.h>
+#include <gdiplus.h>
 
 #include <algorithm>
 #include <array>
@@ -44,11 +46,13 @@ constexpr UINT kMessageHold = WM_APP + 3;
 constexpr UINT kMessageStreamingDone = WM_APP + 4;
 constexpr UINT kMessageCsc = WM_APP + 5;
 constexpr UINT kMessageListeningToggle = WM_APP + 6;
+constexpr UINT kMessagePreview = WM_APP + 7;
 constexpr UINT_PTR kTimerSmoke = 1;
 constexpr UINT_PTR kTimerPipelineStop = 2;
 constexpr UINT_PTR kTimerIdle = 5;
 constexpr UINT_PTR kTimerHold = 6;
 constexpr UINT_PTR kTimerStreamingFeed = 7;
+constexpr UINT_PTR kTimerAnimation = 8;
 constexpr int kHotkeyStart = 1;
 constexpr int kHotkeyStop = 2;
 constexpr int kHotkeyVisibility = 3;
@@ -68,6 +72,7 @@ constexpr int kCommandAppDictionary = 111;
 constexpr int kCommandLearn = 112;
 constexpr int kCommandDevelopmentDictionary = 113;
 constexpr int kCommandCscDetails = 114;
+constexpr int kCommandVisibility = 115;
 constexpr int kLearnPreview = 300;
 constexpr int kLearnSource = 301;
 constexpr int kLearnTarget = 302;
@@ -144,8 +149,10 @@ struct RecognitionResult {
     uint64_t serial = 0, timestamp = 0;
     std::wstring correctionStatus, correctionError, manualCorrection;
     yanflow::TextDelivery delivery;
+    HWND target = nullptr, focus = nullptr;
 };
 struct CscStatus { unsigned int revision; bool ready; std::wstring error; };
+struct PreviewResult { uint64_t revision; std::wstring text; };
 
 std::wstring executableDirectory()
 {
@@ -641,10 +648,11 @@ private:
 class YanFlowApp {
 public:
     explicit YanFlowApp(int smokeMilliseconds) : smokeMilliseconds_(smokeMilliseconds) {}
+    ~YanFlowApp() { if (graphicsToken_) Gdiplus::GdiplusShutdown(graphicsToken_); }
 
     int run()
     {
-        if (smokeMilliseconds_ == -8 || smokeMilliseconds_ == -14) {
+        if (smokeMilliseconds_ == -8 || smokeMilliseconds_ == -13 || smokeMilliseconds_ == -14) {
             wchar_t temporary[MAX_PATH]{};
             if (!GetTempPathW(MAX_PATH, temporary)) return 130;
             dictionarySmokeRoot_ = std::wstring(temporary) + (smokeMilliseconds_ == -14 ? L"YanFlow-hotkey-" : L"YanFlow-learn-") +
@@ -652,6 +660,8 @@ public:
             if (!CreateDirectoryW(dictionarySmokeRoot_.c_str(), nullptr)) return 131;
         }
         instance_ = GetModuleHandleW(nullptr);
+        Gdiplus::GdiplusStartupInput graphicsInput;
+        Gdiplus::GdiplusStartup(&graphicsToken_, &graphicsInput, nullptr);
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         InitCommonControls();
         initializeAutomation();
@@ -666,7 +676,8 @@ public:
             exitCode_ = 70;
         }
         loadSettings();
-        if (smokeMilliseconds_ == -12 || smokeMilliseconds_ == -13 || smokeMilliseconds_ == -14) cscEnabled_.store(false);
+        preview_.initialize(instance_);
+        if (smokeMilliseconds_ <= -12) cscEnabled_.store(false);
         if (smokeMilliseconds_ > 0 && !runComparisonSmoke()) exitCode_ = 158;
         workerRunning_.store(true, std::memory_order_release);
         endpointThread_ = std::thread(&YanFlowApp::endpointLoop, this);
@@ -676,12 +687,41 @@ public:
         registerConfiguredHotkeys(startHotkey_, stopHotkey_, false);
         RegisterHotKey(window_, kHotkeyVisibility, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'H');
         RegisterHotKey(window_, kHotkeyCopy, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'C');
-        ShowWindow(window_, SW_SHOWNOACTIVATE);
+        ShowWindow(window_, floatingVisible_ ? SW_SHOWNOACTIVATE : SW_HIDE);
         UpdateWindow(window_);
         SetTimer(window_, kTimerIdle, 1000, nullptr);
         SetTimer(window_, kTimerHold, 50, nullptr);
+        SetTimer(window_, kTimerAnimation, 160, nullptr);
         if (smokeMilliseconds_ < 0) exitCode_ = 60;
-        if (smokeMilliseconds_ == -12) {
+        if (smokeMilliseconds_ == -15 || smokeMilliseconds_ == -16) {
+            if (smokeMilliseconds_ == -15) {
+                smokeEditorHost_ = CreateWindowExW(0, L"STATIC", L"YanFlow preview smoke", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                    160, 240, 680, 360, nullptr, nullptr, instance_, nullptr);
+                smokeEditor_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE,
+                    20, 60, 620, 220, smokeEditorHost_, nullptr, instance_, nullptr);
+                const DWORD current = GetCurrentThreadId();
+                const DWORD foreground = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+                const bool attached = foreground && foreground != current && AttachThreadInput(current, foreground, TRUE);
+                SetForegroundWindow(smokeEditorHost_); SetFocus(smokeEditor_);
+                if (attached) AttachThreadInput(current, foreground, FALSE);
+                targetWindow_ = smokeEditorHost_;
+            } else rememberTarget();
+            preview_.begin(targetWindow_);
+            { std::lock_guard<std::mutex> lock(queueMutex_); sessionApplication_ = applicationForWindow(targetWindow_); }
+            {
+                GUITHREADINFO info{sizeof(info)};
+                GetGUIThreadInfo(GetWindowThreadProcessId(targetWindow_, nullptr), &info);
+                std::lock_guard<std::mutex> lock(queueMutex_);
+                sessionTarget_ = targetWindow_; sessionFocus_ = info.hwndFocus;
+            }
+            holdSession_.store(true); listening_.store(true); state_ = ListeningState::Listening;
+            lastSpeechTick_.store(GetTickCount64());
+            if (readPcm16Wave(joinPath(executableDirectory(), L"yanflow-asr-smoke.wav"), streamingSmokeSamples_)) {
+                streamingSmokeFrame_.reserve(kSampleRate / 10);
+                SetTimer(window_, kTimerStreamingFeed, 100, nullptr);
+            }
+            SetTimer(window_, kTimerSmoke, 20000, nullptr);
+        } else if (smokeMilliseconds_ == -12) {
             fallbackText_ = L"没有可写的输入框时，识别文字会留在这里。\n可以复制，也可以写入桌面 TXT。";
             fallbackIsTranscript_ = true;
             bool saved = saveUiPreview(L"yanflow-ui-collapsed.bmp", false) && saveUiPreview(L"yanflow-ui-bubble.bmp", true);
@@ -760,6 +800,8 @@ public:
             DispatchMessageW(&message);
         }
         shutdownWorkers();
+        preview_.finish();
+        if (smokeEditorHost_) DestroyWindow(smokeEditorHost_);
         if (!dictionarySmokeRoot_.empty()) {
             const auto apps = dictionarySmokeRoot_ + L"\\dictionaries\\apps";
             DeleteFileW((apps + L"\\yanflow-learning-smoke.exe.tsv").c_str());
@@ -909,6 +951,7 @@ private:
             return TRUE;
         case WM_COMMAND:
             if (LOWORD(wParam) == kCommandToggle) toggleListening();
+            if (LOWORD(wParam) == kCommandVisibility) toggleVisibility();
             if (LOWORD(wParam) == kCommandCopy) copyFallback();
             if (LOWORD(wParam) == kCommandWrite) writeFallbackToDesktop(true);
             if (LOWORD(wParam) == kCommandSettings) showSettings();
@@ -948,6 +991,14 @@ private:
         case kMessageResult:
             acceptResult(reinterpret_cast<RecognitionResult*>(lParam));
             return 0;
+        case kMessagePreview: {
+            auto* result = reinterpret_cast<PreviewResult*>(lParam);
+            if (result && result->revision == previewRevision_.load()) {
+                preview_.setText(result->text);
+                if ((smokeMilliseconds_ == -15 || smokeMilliseconds_ == -16) && listening_.load()) ++smokePreviewResults_;
+            }
+            delete result; return 0;
+        }
         case kMessageStreamingDone:
             finishStreamingSmoke();
             return 0;
@@ -957,6 +1008,9 @@ private:
             if (static_cast<ListeningState>(wParam) == ListeningState::Listening &&
                 !listening_.load(std::memory_order_acquire)) return 0;
             state_ = static_cast<ListeningState>(wParam);
+            if (state_ == ListeningState::Error) {
+                previewRevision_.fetch_add(1); preview_.finish();
+            }
             if (lParam != 0) {
                 std::wstring* messageText = reinterpret_cast<std::wstring*>(lParam);
                 fallbackText_ = *messageText;
@@ -967,7 +1021,27 @@ private:
             InvalidateRect(window_, nullptr, FALSE);
             return 0;
         case WM_TIMER:
-            if (wParam == kTimerStreamingFeed && smokeMilliseconds_ == -11) {
+            if (wParam == kTimerAnimation) {
+                const bool active = listening_.load() || captureDrainPending_.load() || pendingFinal_.load() || inferenceBusy_.load();
+                if (active || animationActive_) InvalidateRect(window_, nullptr, FALSE);
+                if (active != animationActive_) SetTimer(window_, kTimerAnimation, active ? 33 : 160, nullptr);
+                animationActive_ = active;
+                const uint64_t now = GetTickCount64();
+                if (now - lastPreviewRefresh_ >= 160) {
+                    lastPreviewRefresh_ = now;
+                    if (!active) {
+                        preview_.finish();
+                        if (state_ == ListeningState::Recognizing) state_ = ListeningState::Idle;
+                    }
+                    else preview_.refresh();
+                    if ((smokeMilliseconds_ == -15 || smokeMilliseconds_ == -16) && listening_.load()) {
+                        smokePreviewVisible_ = smokePreviewVisible_ || (smokePreviewResults_ && preview_.visible() && GetForegroundWindow() == targetWindow_);
+                        if (smokeEditor_ && GetWindowTextLengthW(smokeEditor_)) smokePrematureText_ = true;
+                    }
+                }
+                return 0;
+            }
+            if (wParam == kTimerStreamingFeed && (smokeMilliseconds_ == -11 || smokeMilliseconds_ == -15 || smokeMilliseconds_ == -16)) {
                 const size_t end = std::min(streamingSmokeSamples_.size(), streamingSmokePosition_ + kSampleRate / 10);
                 streamingSmokeFrame_.assign(streamingSmokeSamples_.begin() + streamingSmokePosition_, streamingSmokeSamples_.begin() + end);
                 capture_.injectForTest(streamingSmokeFrame_);
@@ -981,7 +1055,7 @@ private:
             if (wParam == kTimerHold) {
                 startPendingListening();
                 if (smokeMilliseconds_ == -11) finishStreamingSmoke();
-                if (smokeMilliseconds_ != -7 && smokeMilliseconds_ != -9 && smokeMilliseconds_ != -10 && holdSession_.load(std::memory_order_acquire) && listening_.load() &&
+                if (smokeMilliseconds_ != -7 && smokeMilliseconds_ != -9 && smokeMilliseconds_ != -10 && smokeMilliseconds_ != -15 && smokeMilliseconds_ != -16 && holdSession_.load(std::memory_order_acquire) && listening_.load() &&
                     (!keyboardListener_.holdActive() ||
                      GetTickCount64() - holdStartedTick_ >= kMaximumHoldMilliseconds)) stopListening();
                 return 0;
@@ -1025,6 +1099,7 @@ private:
             paint();
             return 0;
         case WM_DESTROY:
+            preview_.finish();
             keyboardListener_.stop();
             WTSUnRegisterSessionNotification(window_);
             UnregisterHotKey(window_, kHotkeyStart);
@@ -1140,9 +1215,14 @@ private:
         if (learnWindow_ || dictionaryWindow_ || listening_.load(std::memory_order_acquire) || captureDrainPending_.load(std::memory_order_acquire)) return;
         copiedFeedback_ = false;
         rememberTarget();
+        previewRevision_.fetch_add(1);
+        preview_.begin(targetWindow_);
         {
+            GUITHREADINFO info{sizeof(info)};
+            GetGUIThreadInfo(GetWindowThreadProcessId(targetWindow_, nullptr), &info);
             std::lock_guard<std::mutex> lock(queueMutex_);
             sessionApplication_ = applicationForWindow(targetWindow_);
+            sessionTarget_ = targetWindow_; sessionFocus_ = info.hwndFocus;
         }
         holdSession_.store(hold, std::memory_order_release);
         holdStartedTick_ = GetTickCount64();
@@ -1150,6 +1230,7 @@ private:
         if (smokeMilliseconds_ == -14) { ++smokeCaptureStarts_; started = true; }
         else started = capture_.start();
         if (!started) {
+            preview_.finish();
             holdSession_.store(false, std::memory_order_release);
             state_ = ListeningState::Error;
             fallbackText_ = capture_.noInputDevice()
@@ -1178,19 +1259,21 @@ private:
         captureDrainPending_.store(true, std::memory_order_release);
         capture_.stop();
         listening_.store(false, std::memory_order_release);
-        state_ = ListeningState::Idle;
+        state_ = ListeningState::Recognizing;
         InvalidateRect(window_, nullptr, FALSE);
     }
 
     void toggleVisibility()
     {
-        if (IsWindowVisible(window_)) {
+        floatingVisible_ = !floatingVisible_;
+        if (!floatingVisible_) {
             ShowWindow(window_, SW_HIDE);
         } else {
             ShowWindow(window_, SW_SHOWNOACTIVATE);
             SetWindowPos(window_, HWND_TOPMOST, 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
+        WritePrivateProfileStringW(L"Appearance", L"FloatingVisible", floatingVisible_ ? L"1" : L"0", settingsPath().c_str());
     }
 
     std::wstring settingsPath()
@@ -1509,6 +1592,7 @@ private:
     void loadSettings()
     {
         const std::wstring path = settingsPath();
+        floatingVisible_ = GetPrivateProfileIntW(L"Appearance", L"FloatingVisible", 1, path.c_str()) != 0;
         holdEnabled_ = GetPrivateProfileIntW(L"Hotkeys", L"HoldEnabled", 1, path.c_str()) != 0;
         cscEnabled_.store(GetPrivateProfileIntW(L"Correction", L"MacBERTEnabled", 0, path.c_str()) != 0);
         startHotkey_.modifiers = GetPrivateProfileIntW(L"Hotkeys", L"StartModifiers", 0, path.c_str());
@@ -1709,6 +1793,7 @@ private:
         AppendMenuW(menu, MF_STRING | (!fallbackIsTranscript_ || fallbackText_.empty() ? MF_GRAYED : 0),
             kCommandWrite, L"写入桌面 TXT");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, kCommandVisibility, L"隐藏浮动图标\tCtrl+Alt+H 恢复");
         AppendMenuW(menu, MF_STRING, kCommandSettings, L"快捷键设置...");
         AppendMenuW(menu, MF_STRING, kCommandDictionary, L"词库管理（添加、修改、删除）...");
         HMENU dictionaries = CreatePopupMenu();
@@ -1747,11 +1832,13 @@ private:
         FillRect(memory, &rect, background);
         DeleteObject(background);
 
-        HICON currentIcon = (state_ == ListeningState::Listening ||
-            state_ == ListeningState::Recognizing) ? listeningIcon_ : floatingIcon_;
+        const bool active = listening_.load() || captureDrainPending_.load() || pendingFinal_.load() || inferenceBusy_.load();
+        HICON currentIcon = active ? listeningIcon_ : floatingIcon_;
         const bool expanded = rect.right > kCollapsedSize;
-        const int iconSize = expanded ? 40 : kCollapsedSize;
-        const int iconLeft = expanded ? 16 : 0;
+        const double breath = 0.5 - 0.5 * std::cos((GetTickCount64() % 2200) * 6.283185307179586 / 2200.0);
+        const int inset = active ? 6 : 0;
+        const int iconSize = expanded ? 40 : kCollapsedSize - inset * 2;
+        const int iconLeft = expanded ? 16 : inset;
         const int iconTop = (rect.bottom - iconSize) / 2;
         if (currentIcon != nullptr) {
             DrawIconEx(memory, iconLeft, iconTop, currentIcon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
@@ -1769,6 +1856,17 @@ private:
             MoveToEx(memory, 36, 44, nullptr);
             LineTo(memory, 36, 49);
             DeleteObject(micPen);
+        }
+        if (active) {
+            Gdiplus::Graphics graphics(memory);
+            graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            const float diameter = static_cast<float>(expanded ? 46 : 54 + breath * 5);
+            const float centerX = expanded ? 36.0f : 32.0f;
+            const float centerY = rect.bottom / 2.0f;
+            Gdiplus::Pen glow(Gdiplus::Color(static_cast<BYTE>(18 + 25 * breath), 112, 211, 228), 5.0f);
+            Gdiplus::Pen ring(Gdiplus::Color(static_cast<BYTE>(100 + 135 * breath), 137, 225, 237), 1.6f);
+            graphics.DrawEllipse(&glow, centerX - diameter / 2, centerY - diameter / 2, diameter, diameter);
+            graphics.DrawEllipse(&ring, centerX - diameter / 2, centerY - diameter / 2, diameter, diameter);
         }
 
         if (expanded) {
@@ -1861,6 +1959,7 @@ private:
         bool speech = false, wasListening = false, continuation = false;
         int voicedFrames = 0, silentFrames = 0;
         size_t speechVoicedFrames = 0, ownedBegin = 0, streamOffset = 0;
+        uint64_t lastPreviewTick = 0;
         float noiseFloor = 0.004f, previousInput = 0.0f, previousFiltered = 0.0f;
         const auto flush = [&](bool held) {
             if (held && speechVoicedFrames < 18 && silentFrames > 5) {
@@ -1885,6 +1984,7 @@ private:
                 speech = false; voicedFrames = silentFrames = 0;
                 speechVoicedFrames = ownedBegin = streamOffset = 0; continuation = false;
                 preRoll.clear(); utterance.clear(); noiseFloor = 0.004f;
+                lastPreviewTick = 0;
                 previousInput = previousFiltered = 0.0f; wasListening = false;
                 if (captureDrainPending_.load(std::memory_order_acquire)) holdSession_.store(false, std::memory_order_release);
                 captureDrainPending_.store(false, std::memory_order_release);
@@ -1934,6 +2034,22 @@ private:
                     ownedBegin = overlap; continuation = true;
                 }
             }
+            // A replaceable snapshot gives feedback while a phrase (including
+            // a held recording) is still open. Final audio is never discarded
+            // or changed by preview decoding. All copies are on this endpoint
+            // thread; the waveIn callback still only writes to the ring.
+            const uint64_t now = GetTickCount64();
+            if ((smokeMilliseconds_ == 0 || smokeMilliseconds_ == -15 || smokeMilliseconds_ == -16) && speech &&
+                speechVoicedFrames >= 18 && now - lastPreviewTick >= 900) {
+                lastPreviewTick = now;
+                std::lock_guard<std::mutex> lock(queueMutex_);
+                const size_t begin = utterance.size() > kMaximumUtteranceSamples ? utterance.size() - kMaximumUtteranceSamples : 0;
+                previewAudio_.samples.assign(utterance.begin() + begin, utterance.end());
+                previewAudio_.revision = previewRevision_.load();
+                previewAudio_.continuation = begin != 0;
+                previewPending_ = true;
+                queueChanged_.notify_one();
+            }
         }
     }
 
@@ -1943,7 +2059,9 @@ private:
         bool shortHold = false, continuation = false;
         size_t ownedBegin = 0, ownedEnd = 0;
         std::wstring application;
+        HWND target = nullptr, focus = nullptr;
         uint64_t serial = 0;
+        uint64_t revision = 0;
         size_t streamOffset = 0;
     };
 
@@ -1954,7 +2072,10 @@ private:
         const auto serial = submittedUtterances_.fetch_add(1) + 1;
         {
             std::lock_guard<std::mutex> lock(queueMutex_);
-            if (utterances_.size() >= 3) utterances_.pop_front();
+            if (utterances_.size() >= 3) { utterances_.pop_front(); pendingFinal_.fetch_sub(1); }
+            pendingFinal_.fetch_add(1);
+            previewRevision_.fetch_add(1);
+            previewPending_ = false;
             QueuedUtterance utterance;
             utterance.samples = std::move(samples);
             utterance.useVad = useVad;
@@ -1963,6 +2084,7 @@ private:
             utterance.ownedBegin = ownedBegin;
             utterance.ownedEnd = std::min(ownedEnd, utterance.samples.size());
             utterance.application = sessionApplication_;
+            utterance.target = sessionTarget_; utterance.focus = sessionFocus_;
             utterance.serial = serial;
             utterance.streamOffset = streamOffset;
             utterances_.push_back(std::move(utterance));
@@ -1992,15 +2114,31 @@ private:
                 reportCsc(cscRevision, ready);
             }
             QueuedUtterance utterance;
+            bool partial = false;
             {
                 std::unique_lock<std::mutex> lock(queueMutex_);
                 queueChanged_.wait(lock, [this, cscRevision] {
-                    return !workerRunning_.load(std::memory_order_acquire) || !utterances_.empty() || cscRevision_.load() != cscRevision;
+                    return !workerRunning_.load(std::memory_order_acquire) || !utterances_.empty() || previewPending_ || cscRevision_.load() != cscRevision;
                 });
                 if (!workerRunning_.load(std::memory_order_acquire)) break;
                 if (cscRevision_.load() != cscRevision) continue;
-                utterance = std::move(utterances_.front());
-                utterances_.pop_front();
+                if (!utterances_.empty()) {
+                    utterance = std::move(utterances_.front()); utterances_.pop_front();
+                } else {
+                    partial = true; utterance = std::move(previewAudio_); previewPending_ = false;
+                }
+                inferenceBusy_.store(true);
+            }
+            if (partial) {
+                std::wstring text, ignoredError;
+                if (utterance.revision == previewRevision_.load() &&
+                    asrWorker_.transcribe(executableDirectory(), utterance.samples, false, text, ignoredError) &&
+                    !text.empty() && utterance.revision == previewRevision_.load()) {
+                    auto* result = new PreviewResult{utterance.revision, (utterance.continuation ? L"…" : L"") + text};
+                    if (!PostMessageW(window_, kMessagePreview, 0, reinterpret_cast<LPARAM>(result))) delete result;
+                }
+                inferenceBusy_.store(false);
+                continue;
             }
             PostMessageW(window_, kMessageStatus, static_cast<WPARAM>(ListeningState::Recognizing), 0);
             std::wstring text;
@@ -2009,6 +2147,7 @@ private:
                 auto* result = new RecognitionResult;
                 result->raw = text;
                 result->application = utterance.application;
+                result->target = utterance.target; result->focus = utterance.focus;
                 result->serial = utterance.serial;
                 FILETIME time{}; GetSystemTimePreciseAsFileTime(&time);
                 result->timestamp = (static_cast<uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
@@ -2035,6 +2174,8 @@ private:
                 processedStreamingUtterances_.fetch_add(1);
                 PostMessageW(window_, kMessageStreamingDone, 0, 0);
             }
+            pendingFinal_.fetch_sub(1);
+            inferenceBusy_.store(false);
         }
     }
 
@@ -2088,6 +2229,8 @@ private:
         lastManualCorrection_.clear();
         const std::wstring& text = lastRecognition_.final;
         delete result;
+        if (listening_.load()) preview_.setText(L"");
+        else preview_.finish();
         state_ = listening_.load(std::memory_order_acquire) ? ListeningState::Listening : ListeningState::Idle;
         if (listening_.load(std::memory_order_acquire)) {
             lastSpeechTick_.store(GetTickCount64(), std::memory_order_release);
@@ -2095,7 +2238,11 @@ private:
         }
         if (smokeMilliseconds_ != -2 && smokeMilliseconds_ != -4 && smokeMilliseconds_ != -7 && smokeMilliseconds_ != -9 && smokeMilliseconds_ != -10 && smokeMilliseconds_ != -11 && smokeMilliseconds_ != -13) {
             HWND foreground = GetForegroundWindow();
+            GUITHREADINFO info{sizeof(info)};
+            GetGUIThreadInfo(GetWindowThreadProcessId(foreground, nullptr), &info);
+            targetWasEditable_ = false;
             if (foreground != nullptr && foreground != window_ &&
+                (!lastRecognition_.target || (foreground == lastRecognition_.target && info.hwndFocus == lastRecognition_.focus)) &&
                 (lastRecognition_.application.empty() || applicationForWindow(foreground) == lastRecognition_.application)) {
                 targetWindow_ = foreground;
                 targetWasEditable_ = focusedElementAcceptsText();
@@ -2123,7 +2270,22 @@ private:
             expandBubble();
         }
         InvalidateRect(window_, nullptr, FALSE);
-        if (smokeMilliseconds_ == -1) {
+        if (smokeMilliseconds_ == -15 || smokeMilliseconds_ == -16) {
+            const bool valid = smokePreviewVisible_ && smokePreviewResults_ > 0 && !smokePrematureText_ && injected &&
+                submittedUtterances_.load() == 1 && !listening_.load() && !preview_.visible() &&
+                text.find(L"滨海新区有房") != std::wstring::npos;
+            auto diagnostics = L"partial_results=" + std::to_wstring(smokePreviewResults_) +
+                L" visible=" + std::to_wstring(smokePreviewVisible_) + L" premature=" + std::to_wstring(smokePrematureText_) +
+                L" injected=" + std::to_wstring(injected) + L"\n" + text;
+            GUITHREADINFO currentInfo{sizeof(currentInfo)};
+            GetGUIThreadInfo(GetWindowThreadProcessId(GetForegroundWindow(), nullptr), &currentInfo);
+            diagnostics += L"\nforeground_match=" + std::to_wstring(GetForegroundWindow() == targetWindow_) +
+                L" focus_match=" + std::to_wstring(currentInfo.hwndFocus == lastRecognition_.focus) +
+                L" editable=" + std::to_wstring(targetWasEditable_) + L" native_class=" + lastNativeFocusClass_;
+            yanflow::writeUtf8File(joinPath(executableDirectory(), L"yanflow-preview-result.txt"), diagnostics);
+            exitCode_ = valid ? 0 : 190;
+            DestroyWindow(window_);
+        } else if (smokeMilliseconds_ == -1) {
             const std::wstring diagnosticPath = joinPath(executableDirectory(), L"yanflow-e2e-diagnostic.txt");
             FILE* diagnostic = nullptr;
             if (_wfopen_s(&diagnostic, diagnosticPath.c_str(), L"wb") == 0 && diagnostic != nullptr) {
@@ -2309,6 +2471,16 @@ private:
 
     int runUiStateSmoke()
     {
+        if (!preview_.runSmoke()) return 191;
+        SendMessageW(window_, WM_COMMAND, kCommandVisibility, 0);
+        fallbackText_ = L"隐藏后收到的识别结果"; fallbackIsTranscript_ = true; expandBubble();
+        if (floatingVisible_ || IsWindowVisible(window_) || GetPrivateProfileIntW(L"Appearance", L"FloatingVisible", 1, settingsPath().c_str())) return 192;
+        SendMessageW(window_, WM_HOTKEY, kHotkeyVisibility, 0);
+        if (!floatingVisible_ || !IsWindowVisible(window_)) return 193;
+        dismissFallback();
+        const auto revision = previewRevision_.load();
+        SendMessageW(window_, kMessagePreview, 0, reinterpret_cast<LPARAM>(new PreviewResult{revision - 1, L"过期预览"}));
+        if (preview_.visible()) return 194;
         targetWindow_ = nullptr; targetWasEditable_ = false;
         // This exercises delivery-state handling only, never a foreground app.
         const auto result = [this](bool submitted, const wchar_t* status) {
@@ -2619,7 +2791,7 @@ private:
         }
         top = std::max(top, static_cast<int>(monitorInfo.rcWork.top));
         SetWindowRgn(window_, CreateRoundRectRgn(0, 0, width, height, 24, 24), TRUE);
-        SetWindowPos(window_, HWND_TOPMOST, left, top, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        SetWindowPos(window_, HWND_TOPMOST, left, top, width, height, SWP_NOACTIVATE | (floatingVisible_ ? SWP_SHOWWINDOW : 0));
         bubbleExpanded_ = expanded;
     }
 
@@ -2635,6 +2807,16 @@ private:
     }
 
     HINSTANCE instance_ = nullptr;
+    ULONG_PTR graphicsToken_ = 0;
+    yanflow::RecognitionPreview preview_;
+    std::atomic<uint64_t> previewRevision_{0};
+    std::atomic<bool> inferenceBusy_{false};
+    std::atomic<size_t> pendingFinal_{0};
+    uint64_t lastPreviewRefresh_ = 0;
+    bool animationActive_ = false, floatingVisible_ = true;
+    HWND smokeEditorHost_ = nullptr, smokeEditor_ = nullptr;
+    size_t smokePreviewResults_ = 0;
+    bool smokePreviewVisible_ = false, smokePrematureText_ = false;
     yanflow::KeyboardListener keyboardListener_;
     enum class PendingStart { None, Hold, Realtime };
     PendingStart pendingStart_ = PendingStart::None;
@@ -2685,7 +2867,10 @@ private:
     std::mutex queueMutex_;
     std::condition_variable queueChanged_;
     std::deque<QueuedUtterance> utterances_;
+    QueuedUtterance previewAudio_;
+    bool previewPending_ = false;
     std::wstring sessionApplication_, menuApplication_;
+    HWND sessionTarget_ = nullptr, sessionFocus_ = nullptr;
     std::wstring dictionarySmokeRoot_;
     RecognitionResult learningResult_;
     ListeningState state_ = ListeningState::Idle;

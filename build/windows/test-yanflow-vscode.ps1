@@ -1,3 +1,4 @@
+param([switch]$Preview)
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName UIAutomationClient
@@ -9,6 +10,10 @@ public static class YanFlowVsCodeFocus {
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, IntPtr pid);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint first, uint second, bool attach);
+    [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr window);
 }
 "@
 
@@ -32,14 +37,37 @@ function Get-IsolatedCodeProcesses {
         Where-Object { $null -ne $_.CommandLine -and $_.CommandLine.Contains($profile) })
 }
 
+function Set-IsolatedCodeForeground([IntPtr]$Window) {
+    $current = [YanFlowVsCodeFocus]::GetCurrentThreadId()
+    $foreground = [YanFlowVsCodeFocus]::GetWindowThreadProcessId([YanFlowVsCodeFocus]::GetForegroundWindow(), [IntPtr]::Zero)
+    $target = [YanFlowVsCodeFocus]::GetWindowThreadProcessId($Window, [IntPtr]::Zero)
+    $attached = $foreground -and $foreground -ne $current -and [YanFlowVsCodeFocus]::AttachThreadInput($current, $foreground, $true)
+    $attachedTarget = $target -and $target -ne $current -and $target -ne $foreground -and [YanFlowVsCodeFocus]::AttachThreadInput($current, $target, $true)
+    try {
+        [void][YanFlowVsCodeFocus]::ShowWindow($Window, 9)
+        [void][YanFlowVsCodeFocus]::SetForegroundWindow($Window)
+        [void][YanFlowVsCodeFocus]::SetFocus($Window)
+        return [YanFlowVsCodeFocus]::GetForegroundWindow() -eq $Window
+    }
+    finally {
+        if ($attachedTarget) { [void][YanFlowVsCodeFocus]::AttachThreadInput($current, $target, $false) }
+        if ($attached) { [void][YanFlowVsCodeFocus]::AttachThreadInput($current, $foreground, $false) }
+    }
+}
+
 $editor = $null
 try {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $testRoot
     Remove-Item -Force -ErrorAction SilentlyContinue $diagnostic
     New-Item -ItemType Directory -Force $profile, $extensions | Out-Null
+    $userSettings = Join-Path $profile "User"
+    New-Item -ItemType Directory -Force $userSettings | Out-Null
+    [IO.File]::WriteAllText((Join-Path $userSettings "settings.json"),
+        '{"security.workspace.trust.enabled":false,"editor.accessibilitySupport":"on","workbench.startupEditor":"none"}',
+        [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText($document, "YANFLOW-VSCODE:", [Text.UTF8Encoding]::new($false))
     Copy-Item -Force $sample $fixture
-    $arguments = '--user-data-dir="{0}" --extensions-dir="{1}" --disable-extensions --skip-welcome --new-window "{2}"' -f $profile, $extensions, $document
+    $arguments = '--user-data-dir="{0}" --extensions-dir="{1}" --disable-extensions --disable-gpu --skip-welcome --new-window "{2}"' -f $profile, $extensions, $document
     [void](Start-Process $code -ArgumentList $arguments)
 
     $deadline = (Get-Date).AddSeconds(20)
@@ -56,15 +84,18 @@ try {
     if ($null -eq $editor) { throw "Isolated VS Code window did not become ready" }
 
     [void][YanFlowVsCodeFocus]::ShowWindow($editor.MainWindowHandle, 5)
-    if (-not [YanFlowVsCodeFocus]::SetForegroundWindow($editor.MainWindowHandle)) {
-        throw "Could not focus isolated VS Code window"
-    }
+    [void](Set-IsolatedCodeForeground $editor.MainWindowHandle)
     # A top-level Electron window can appear before its editor is ready. Wait for
     # an editable focus instead of relying on a fixed delay.
     $editableReady = $false
     $deadline = (Get-Date).AddSeconds(15)
     do {
-        [void][YanFlowVsCodeFocus]::SetForegroundWindow($editor.MainWindowHandle)
+        $editor.Refresh()
+        [void](Set-IsolatedCodeForeground $editor.MainWindowHandle)
+        if ([YanFlowVsCodeFocus]::GetForegroundWindow() -ne $editor.MainWindowHandle) {
+            Start-Sleep -Milliseconds 100
+            continue
+        }
         [Windows.Forms.SendKeys]::SendWait("^1")
         [Windows.Forms.SendKeys]::SendWait("^{END}")
         Start-Sleep -Milliseconds 200
@@ -76,19 +107,25 @@ try {
                 $type -eq [Windows.Automation.ControlType]::Document
         }
     } while (-not $editableReady -and (Get-Date) -lt $deadline)
-    if (-not $editableReady) { throw "Isolated VS Code editor did not acquire editable focus" }
+    if (-not $editableReady) {
+        $focusType = if ($null -ne $focused) { $focused.Current.ControlType.ProgrammaticName } else { "none" }
+        throw "Isolated VS Code editor did not acquire editable focus (window=$($editor.MainWindowHandle), foreground=$([YanFlowVsCodeFocus]::GetForegroundWindow()), type=$focusType)"
+    }
 
-    $process = Start-Process $yanflow -ArgumentList "--e2e-smoke" -PassThru
+    $option = if ($Preview) { "--preview-e2e-smoke" } else { "--e2e-smoke" }
+    $process = Start-Process $yanflow -ArgumentList $option -PassThru
     if (-not $process.WaitForExit(15000)) {
         $process.Kill()
         throw "YanFlow VS Code E2E timed out"
     }
     if ($process.ExitCode -ne 0) {
-        $details = if (Test-Path $diagnostic) { [IO.File]::ReadAllText($diagnostic) } else { "no YanFlow diagnostic" }
+        $details = if ($Preview -and (Test-Path (Join-Path $package "yanflow-preview-result.txt"))) {
+            [IO.File]::ReadAllText((Join-Path $package "yanflow-preview-result.txt"))
+        } elseif (Test-Path $diagnostic) { [IO.File]::ReadAllText($diagnostic) } else { "no YanFlow diagnostic" }
         throw "YanFlow VS Code E2E exited with $($process.ExitCode): $details"
     }
 
-    [void][YanFlowVsCodeFocus]::SetForegroundWindow($editor.MainWindowHandle)
+    if (-not (Set-IsolatedCodeForeground $editor.MainWindowHandle)) { throw "Isolated VS Code lost foreground before save" }
     Start-Sleep -Milliseconds 200
     [Windows.Forms.SendKeys]::SendWait("^s")
     Start-Sleep -Milliseconds 700
@@ -98,7 +135,7 @@ try {
         $details = if (Test-Path $diagnostic) { [IO.File]::ReadAllText($diagnostic) } else { "no YanFlow diagnostic" }
         throw "Recognized text was not injected into VS Code editor. Actual=$actual Diagnostic=$details"
     }
-    Write-Host "PASS yanflow-vscode-editor text=$actual"
+    Write-Host "PASS yanflow-vscode-editor preview=$Preview text=$actual"
 } finally {
     foreach ($isolated in Get-IsolatedCodeProcesses) {
         Stop-Process -Id $isolated.ProcessId -Force -ErrorAction SilentlyContinue
@@ -106,4 +143,5 @@ try {
     Start-Sleep -Milliseconds 250
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $testRoot
     Remove-Item -Force -ErrorAction SilentlyContinue $fixture, $diagnostic
+    if ($Preview) { Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $package "yanflow-preview-result.txt") }
 }

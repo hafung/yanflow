@@ -27,12 +27,13 @@
 
 纯本地处理，纯 CPU 完成端点检测和识别。不用担心隐私问题，不需要账号、网络、Python、
 PyTorch，更不要求独立显卡。模型由常驻 worker 只加载一次，采集回调只写固定无锁环形
-缓冲；没有临时 WAV，没有每句话一次冷启动。识别队列有上限，悬浮窗只在状态变化时重绘。
+缓冲；没有临时 WAV，没有每句话一次冷启动。识别队列有上限，识别中的悬浮图标带有克制的呼吸光环，空闲时停止动画。
 
 ### 它会什么
 
 - **全局落字**：记事本、浏览器地址栏、VS Code，以及其他标准 Edit/Document 控件。
 - **不抢焦点**：原生 Win32 无激活悬浮窗；拖动、隐藏、复制、快捷键设置都在手边。
+- **光标旁预览**：可定位的输入光标上方显示实时识别气泡，短句自适应宽度、长句换行；按住模式松开后写入最终结果，实时监听在每段识别结束后写入。长录音预览显示最近约 8 秒，最终结果仍处理完整录音。
 - **离线端侧**：16 kHz 单声道采集，自适应噪声底、300 ms 预卷、最长 8 秒连续切片。
 - **保护切片边界**：长录音优先在静音附近切分；连续语音使用小幅重叠和 CTC 时间对齐，单次推理仍不超过 8 秒。
 - **短词也提交**：按住模式单独支持短词，经过较严格的人声复核；静音和短促敲击仍被过滤。
@@ -47,6 +48,8 @@ PyTorch，更不要求独立显卡。模型由常驻 worker 只加载一次，�
 2. 解压到任意可写目录，运行 `yanflow.exe`。
 3. 按住 `Ctrl + Win` 录音，松开任一键识别（最长 60 秒）。`Ctrl + Win + Shift` 按一次
    开启实时监听，再按一次关闭。右键悬浮按钮可以设置额外快捷键或关闭按住模式。
+
+右键“隐藏浮动图标”可隐藏悬浮按钮，`Ctrl + Alt + H` 恢复；隐藏状态会保存。隐藏按钮后仍可使用录音快捷键和光标旁预览。
 
 ### 保守纠错
 
@@ -148,11 +151,13 @@ build\windows\test-yanflow-pipeline.cmd
 build\windows\test-yanflow-textbox.cmd
 build\windows\test-yanflow-fallback.cmd
 build\windows\test-yanflow-ui.cmd
+build\windows\test-yanflow-preview.cmd
 build\windows\test-yanflow-edge.cmd
 build\windows\test-yanflow-vscode.cmd
 build\windows\test-yanflow-hold.cmd
 build\windows\test-yanflow-correction.cmd
 build\windows\test-yanflow-accuracy.cmd
+powershell -NoProfile -ExecutionPolicy Bypass -File build\windows\test-yanflow-vscode.ps1 -Preview
 ```
 
 The native-package check verifies PE imports, creates `build\artifacts\YanFlow-native-windows-x64.zip`

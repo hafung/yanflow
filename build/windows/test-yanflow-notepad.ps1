@@ -1,3 +1,4 @@
+param([switch]$Preview)
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms
 
@@ -35,7 +36,8 @@ try {
     Start-Sleep -Milliseconds 250
     [Windows.Forms.SendKeys]::SendWait("^{END}")
 
-    $process = Start-Process $yanflow -ArgumentList "--e2e-smoke" -PassThru
+    $option = if ($Preview) { "--preview-e2e-smoke" } else { "--e2e-smoke" }
+    $process = Start-Process $yanflow -ArgumentList $option -PassThru
     if (-not $process.WaitForExit(15000)) {
         $process.Kill()
         throw "YanFlow E2E smoke timed out"
@@ -52,12 +54,13 @@ try {
     if (-not $actual.Contains("YANFLOW-E2E:") -or -not $actual.Contains($expected)) {
         throw "Recognized Unicode text was not injected into Notepad. Actual: $actual"
     }
-    Write-Host "PASS yanflow-notepad-e2e text=$actual"
+    Write-Host "PASS yanflow-notepad-e2e preview=$Preview text=$actual"
 } finally {
     if ($null -ne $notepad) {
         Stop-Process -Id $notepad.Id -Force -ErrorAction SilentlyContinue
     }
     Remove-Item -Force -ErrorAction SilentlyContinue $fixture, $targetFile
+    if ($Preview) { Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $package "yanflow-preview-result.txt") }
     if ($null -ne $savedClipboard) {
         [Windows.Forms.Clipboard]::SetDataObject($savedClipboard, $true)
     }
