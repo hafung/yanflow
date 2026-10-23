@@ -21,13 +21,18 @@
 
 ## 中文
 
-言流是 Windows 上的全局实时语音转录工具。默认按住 `Ctrl + Win` 录音，松开识别；`Ctrl + Win + Shift` 切换实时监听。结果会
-落进此刻正在编辑的地方；没有合适的输入框时，它就把文字留在一枚可复制、可写入 TXT
-的气泡里。
+言流是 Windows 上的全局实时语音转录工具。**轻巧、省资源，纯本地运行，无需联网，不上传录音。**
+默认按住 `Ctrl + Win` 录音，松开识别；`Ctrl + Win + Shift` 切换实时监听。结果会落进此刻正在编辑的地方；
+没有合适的输入框时，它就把文字留在一枚可复制、可写入 TXT 的气泡里。
 
-纯本地处理，纯 CPU 完成端点检测和识别。不用担心隐私问题，不需要账号、网络、Python、
-PyTorch，更不要求独立显卡。模型由常驻 worker 只加载一次，采集回调只写固定无锁环形
-缓冲；没有临时 WAV，没有每句话一次冷启动。识别队列有上限，识别中的悬浮图标带有克制的呼吸光环，空闲时停止动画。
+**让声音落在光标上，而不是云端。** 端点检测和语音识别全部由本机 CPU 完成，无需账号、Python、PyTorch 或独立显卡。
+原生 C++ 与 Win32，模型只加载一次，没有每句话一次冷启动；识别队列有上限，空闲时停止动画，
+长时间无人声时自动关闭麦克风。把资源留给正在做的事，把录音留在自己的电脑里。
+
+**用声音和 LLM 交流，不必先把每个字都修到完美。** 对于上下文明确的日常指令，LLM 往往能理解少量错别字、
+同音误识别和口语表达。先把想法说出来，让交流继续；人名、数字、路径和关键术语仍值得核对。
+
+**试着告别大厂的云端语音输入法，从本地语音输入开始。** 下载、解压、运行，把麦克风和输入方式的选择权握在自己手里。
 
 ### 它会什么
 
@@ -84,15 +89,24 @@ GitHub ZIP 当前未使用受信任的代码签名，首次启动可能出现 Sm
 
 Some words should not have to leave the room before they become text.
 
-YanFlow is a system-wide voice layer for Windows. It floats above every app without stealing
+YanFlow is a system-wide voice layer for Windows. **Lightweight and resource-conscious, entirely local,
+with no network connection required and no audio uploads.** It floats above every app without stealing
 focus. Hold `Ctrl + Win` to record and release to recognize; the transcript lands in whatever you are editing.
 If there is no writable target, the words wait in a compact bubble—ready to copy or save as TXT.
 
-Its “cloud” is the few centimetres of air above your desk. SenseVoiceSmall Q8 and FSMN-VAD run
-entirely on the local CPU: no audio upload, account, network service, Python, PyTorch, or discrete
-GPU. A resident worker loads the model once; audio capture writes into a fixed lock-free ring
-buffer. No temporary WAV files. No cold start for every sentence. The footprint does not vanish
-by incantation—it is simply kept inside deliberate boundaries.
+**Let your voice land on the cursor—not in the cloud.** SenseVoiceSmall Q8 and FSMN-VAD run
+entirely on the local CPU: no account, Python, PyTorch, or discrete GPU required. Built with native
+C++ and Win32, YanFlow loads the model once, avoids a cold start for every sentence, bounds the
+recognition queue, stops idle animations, and turns off the microphone after prolonged silence.
+Keep resources available for your work and recordings on your own computer.
+
+**Speak to an LLM without polishing every word first.** For everyday instructions with clear context,
+LLMs can often understand a few typos, similar-sounding transcription errors, and informal phrasing.
+Get your thoughts out and keep the conversation moving; names, numbers, paths, and key terms still
+deserve a check.
+
+**Try leaving big-tech cloud voice input behind. Start with local voice input.** Download, extract,
+and run. Keep control of your microphone and how you type.
 
 ### What it does
 
