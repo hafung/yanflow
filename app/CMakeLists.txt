@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(yanflow VERSION 0.4.5 LANGUAGES CXX RC)
+project(yanflow VERSION 0.4.6 LANGUAGES CXX RC)
 
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "YanFlow requires Windows x64 and the MSVC toolchain")
@@ -13,6 +13,7 @@ add_executable(yanflow WIN32 main.cpp yanflow.cpp yanflow.h yanflow.rc
     text-pipeline.cpp text-pipeline.h csc-protocol.h
     text-delivery.cpp text-delivery.h
     recognition-preview.cpp recognition-preview.h
+    prepared-asr.cpp prepared-asr.h
     audio-segmentation.cpp audio-segmentation.h asr-protocol.h dictionary-store.cpp dictionary-store.h
     dictionary-manager.cpp dictionary-manager.h keyboard-listener.cpp keyboard-listener.h)
 target_compile_features(yanflow PRIVATE cxx_std_17)

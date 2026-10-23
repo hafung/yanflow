@@ -8,6 +8,7 @@
 #include "text-correction.h"
 #include "text-pipeline.h"
 #include "audio-segmentation.h"
+#include "prepared-asr.h"
 #include "dictionary-store.h"
 #include "dictionary-manager.h"
 #include "text-delivery.h"
@@ -59,12 +60,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         else if (std::wcscmp(option, L"--hotkey-startup-smoke") == 0) smokeMilliseconds = -14;
         else if (std::wcscmp(option, L"--preview-pipeline-smoke") == 0) smokeMilliseconds = -15;
         else if (std::wcscmp(option, L"--preview-e2e-smoke") == 0) smokeMilliseconds = -16;
+        else if (std::wcscmp(option, L"--prepared-asr-smoke") == 0) smokeMilliseconds = -17;
+        else if (std::wcscmp(option, L"--unprepared-asr-smoke") == 0) smokeMilliseconds = -18;
     }
     LocalFree(arguments);
 
     if (accuracySmoke) {
         const int result = yanflow::runAudioSegmentationSmoke();
-        return result ? result : yanflow::runDictionaryStoreSmoke();
+        if (result) return result;
+        const int prepared = yanflow::runPreparedAsrSmoke();
+        return prepared ? prepared : yanflow::runDictionaryStoreSmoke();
     }
 
     return textSmoke ? yanflow::runTextCorrectionSmoke() : asrSmoke ? runAsrSmoke() : runYanFlow(smokeMilliseconds);

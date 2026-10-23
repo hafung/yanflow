@@ -3,6 +3,7 @@
 /build/native/
 /build/typephp/
 /vendor/
+/local/asr-eval/
 yanflow.ini
 *.partial
 *.obj
